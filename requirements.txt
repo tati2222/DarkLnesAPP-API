@@ -1,4 +1,5 @@
-gradio==4.29.0
+gradio
 torch
 torchvision
+huggingface_hub
 Pillow
