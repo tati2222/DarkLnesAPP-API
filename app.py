@@ -1,85 +1,137 @@
 import gradio as gr
 import torch
 import torch.nn as nn
-from torchvision import transforms
+import torchvision.transforms as transforms
 from PIL import Image
-from huggingface_hub import hf_hub_download
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
+# --------------------------
+#   CARGA DEL MODELO
+# --------------------------
 
-# ---------------------------
-# Cargar Modelo
-# ---------------------------
-
-# Descargar automáticamente tu archivo .pth desde tu repo
-ckpt_path = hf_hub_download(
-    repo_id="psicoit/DarkLens-model",
-    filename="exp_retrained_FER2013.pth"
-)
-
-# Definir modelo
 class MicroExpNet(nn.Module):
     def __init__(self):
         super().__init__()
-        self.conv1 = nn.Conv2d(1, 8, 3, padding=1)
-        self.bn1 = nn.BatchNorm2d(8)
-        self.conv2 = nn.Conv2d(8, 16, 3, padding=1)
-        self.bn2 = nn.BatchNorm2d(16)
-        self.fc = nn.Linear(16 * 48 * 48, 7)
+        self.model = torch.hub.load('pytorch/vision:v0.10.0', 'efficientnet_b0', pretrained=False)
+        self.model.classifier[1] = nn.Linear(self.model.classifier[1].in_features, 7)
 
     def forward(self, x):
-        x = torch.relu(self.bn1(self.conv1(x)))
-        x = torch.relu(self.bn2(self.conv2(x)))
-        x = x.view(x.size(0), -1)
-        return self.fc(x)
+        return self.model(x)
 
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
-model = MicroExpNet().to(device)
+model = MicroExpNet()
+state = torch.load("microexp_retrained_FER2013.pth", map_location=device)
+new_state = {}
 
-# Cargar pesos
-state_dict = torch.load(ckpt_path, map_location="cpu")
-model.load_state_dict(state_dict, strict=False)
+for k, v in state.items():
+    nk = k.replace("model.", "")
+    new_state[nk] = v
+
+model.load_state_dict(new_state, strict=False)
+model.to(device)
 model.eval()
 
-labels = ["Enojo", "Asco", "Miedo", "Felicidad", "Tristeza", "Sorpresa", "Neutral"]
+# --------------------------
+# PREPROCESAMIENTO
+# --------------------------
 
 transform = transforms.Compose([
-    transforms.Grayscale(),
-    transforms.Resize((48, 48)),
+    transforms.Resize((224, 224)),
     transforms.ToTensor(),
 ])
 
-# ---------------------------
-# Función de predicción
-# ---------------------------
+labels = ["Alegría", "Tristeza", "Enojo", "Sorpresa", "Miedo", "Disgusto", "Neutral"]
+
+# --------------------------
+# RELACIÓN CON SD3
+# --------------------------
+
+def compute_sd3(emotions):
+    # Valores ficticios, tú puedes afinarlos luego
+    maqu = emotions["Enojo"] * 0.6 + emotions["Disgusto"] * 0.4
+    narc = emotions["Alegría"] * 0.5 + emotions["Neutral"] * 0.5
+    psic = emotions["Miedo"] * 0.7 + emotions["Sorpresa"] * 0.3
+
+    return {
+        "Maquiavelismo": round(maqu * 100, 2),
+        "Narcisismo": round(narc * 100, 2),
+        "Psicopatía": round(psic * 100, 2)
+    }
+
+# --------------------------
+# FUNCIÓN PRINCIPAL
+# --------------------------
+
 def analizar(img):
-    img = Image.fromarray(img).convert("RGB")
-    x = transform(img).unsqueeze(0).to(device)
+    image = Image.fromarray(img)
+    tensor = transform(image).unsqueeze(0).to(device)
 
     with torch.no_grad():
-        out = model(x)
-        pred = torch.argmax(out).item()
+        out = model(tensor)
+        probs = torch.softmax(out, dim=1)[0].cpu().numpy()
 
-    return labels[pred]
+    emotions = {labels[i]: float(probs[i]) for i in range(7)}
+    sd3 = compute_sd3(emotions)
+
+    return emotions, sd3
 
 
-# ---------------------------
-# Interfaz (estética violeta futurista)
-# ---------------------------
+# --------------------------
+# INTERFAZ GRADIO - DARKLENS
+# --------------------------
 
-custom_css = """
-body {background: linear-gradient(135deg, #3a0066, #8a00c2);}
-.gradio-container {color: white !important;}
-button {background: #b300ff !important; color:white !important;}
+css = """
+body {
+    background: radial-gradient(circle at center, #3a0066, #14001f);
+    color: white !important;
+}
+.gradio-container {
+    background: transparent !important;
+    color: white !important;
+}
+label, .label, .title, h1, h2, h3, p, span {
+    color: white !important;
+}
+button {
+    background: #6a0dad !important;
+    color: white !important;
+    border-radius: 8px !important;
+}
 """
 
-demo = gr.Interface(
-    fn=analizar,
-    inputs=gr.Image(type="numpy", label="Subí una imagen"),
-    outputs=gr.Text(label="Resultado"),
-    title="DarkLens",
-    description="Analizador de microexpresiones - Modelo Personalizado",
-    css=custom_css
-)
+with gr.Blocks(css=css, title="DarkLens") as app:
+    gr.Markdown("<h1 style='text-align:center;'>🟣 DarkLens — Detector de Microexpresiones</h1>")
 
-demo.launch()
+    with gr.Row():
+        img_input = gr.Image(type="numpy", label="Subí una imagen")
+        btn = gr.Button("🔍 Analizar imagen")
+
+    with gr.Row():
+        emociones_out = gr.BarPlot(
+            label="Microexpresiones detectadas",
+            x="labels",
+            y="values",
+        )
+
+        sd3_out = gr.BarPlot(
+            label="Rasgos SD3",
+            x="labels",
+            y="values",
+        )
+
+    def process(img):
+        emotions, sd3 = analizar(img)
+        emo_labels = list(emotions.keys())
+        emo_values = list(emotions.values())
+
+        sd3_labels = list(sd3.keys())
+        sd3_values = list(sd3.values())
+
+        return {
+            emociones_out: {"labels": emo_labels, "values": emo_values},
+            sd3_out: {"labels": sd3_labels, "values": sd3_values}
+        }
+
+    btn.click(process, inputs=[img_input], outputs=[emociones_out, sd3_out])
+
+app.launch()
