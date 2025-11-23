@@ -1,5 +1,18 @@
-gradio==4.36.1
-torch==2.6.0
+# PyTorch y Torchvision compatibles
+torch==2.7.0
 torchvision==0.22.0
-huggingface_hub==0.25.1
-Pillow
+
+# Gradio para la interfaz web
+gradio==3.59.2
+
+# Otros paquetes de tu proyecto
+numpy==1.25.2
+pandas==2.1.1
+scipy==1.12.2
+matplotlib==3.8.1
+scikit-learn==1.3.2
+opencv-python==4.8.1.78
+fsspec==2025.10.0
+sympy==1.13.1
+triton==3.2.0
+setuptools==80.9.0
