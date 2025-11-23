@@ -103,7 +103,8 @@ def cargar_modelo():
     except Exception as e:
         st.error(f"❌ Error al cargar modelo: {str(e)}")
         st.info("Verifica que el archivo microexp_retrained_FER2013.pth esté en la raíz del proyecto")
-        st.info(f"Primera clave del state_dict: {list(state.keys())[0] if 'state' in locals() else 'No disponible'}")
+        if 'state' in locals():
+            st.info(f"Primera clave del state_dict: {list(state.keys())[0]}")
         raise
     
     model.to(device)
@@ -111,6 +112,7 @@ def cargar_modelo():
     
     return model, device
 
+# Cargar modelo al inicio
 model, device = cargar_modelo()
 
 # --------------------------
@@ -291,4 +293,83 @@ if uploaded_file is not None:
         st.markdown(f"""
         <div class="conclusion-box">
             <h2>🔬 Análisis Psicológico Completo</h2>
-            <p class="emotio
+            <p class="emotion-dominant">
+                Perfil Detectado: {analisis['emocion_dominante']} ({analisis['emocion_valor']*100:.1f}%) 
+                + {analisis['rasgo_dominante']} ({analisis['rasgo_valor']:.1f}%)
+            </p>
+            <p><strong>Intensidad del rasgo:</strong> {analisis['color_nivel']} {analisis['nivel_intensidad']}</p>
+            <hr style="border-color: rgba(255,255,255,0.3); margin: 1rem 0;">
+            <h3>💡 Interpretación Específica:</h3>
+            <p style="font-size: 1.1rem; line-height: 1.8;">{analisis['analisis_especifico']}</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Gráficos en columnas
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("📊 Microexpresiones detectadas")
+            df_emotions = pd.DataFrame({
+                'Emoción': list(emotions.keys()),
+                'Probabilidad': list(emotions.values())
+            })
+            st.bar_chart(df_emotions.set_index('Emoción'))
+            
+            st.write("**Valores detallados:**")
+            for emo, val in sorted(emotions.items(), key=lambda x: x[1], reverse=True):
+                st.write(f"- **{emo}**: {val*100:.2f}%")
+        
+        with col2:
+            st.subheader("🧠 Rasgos SD3 (Dark Triad)")
+            df_sd3 = pd.DataFrame({
+                'Rasgo': list(sd3.keys()),
+                'Puntuación': list(sd3.values())
+            })
+            st.bar_chart(df_sd3.set_index('Rasgo'))
+            
+            st.write("**Valores:**")
+            for rasgo, val in sorted(sd3.items(), key=lambda x: x[1], reverse=True):
+                st.write(f"- **{rasgo}**: {val:.2f}%")
+        
+        # INTERPRETACIÓN SD3 DETALLADA
+        st.markdown("---")
+        st.markdown("### 🔍 Interpretación Detallada de Rasgos SD3")
+        
+        interpretaciones_sd3 = interpretar_sd3_detallado(sd3)
+        for interp in interpretaciones_sd3:
+            st.markdown(f"""
+            <div class="metric-box">
+                <h4>{interp['color']} {interp['rasgo']}: {interp['nivel']} ({interp['valor']:.1f}%)</h4>
+                <p style="margin-top: 0.5rem;">{interp['descripcion']}</p>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        # ADVERTENCIA
+        st.markdown("""
+        <div class="warning-box">
+            <strong>⚠️ Nota Importante:</strong> Este análisis es orientativo y basado en microexpresiones faciales. 
+            No debe usarse como diagnóstico clínico ni para tomar decisiones importantes sobre personas. 
+            Los rasgos SD3 son constructos psicológicos que existen en un continuo y requieren evaluación profesional.
+        </div>
+        """, unsafe_allow_html=True)
+
+else:
+    st.info("👆 Sube una imagen para comenzar el análisis")
+    
+    # Información adicional
+    st.markdown("---")
+    st.markdown("### 🎯 ¿Qué hace esta aplicación?")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.markdown("#### 😊 Detección de Emociones")
+        st.write("Identifica 7 emociones básicas: Alegría, Tristeza, Enojo, Sorpresa, Miedo, Disgusto y Neutral.")
+    
+    with col2:
+        st.markdown("#### 🧠 Análisis SD3")
+        st.write("Evalúa tres rasgos de personalidad oscura: Maquiavelismo, Narcisismo y Psicopatía.")
+    
+    with col3:
+        st.markdown("#### 🔬 Interpretación Cruzada")
+        st.write("Combina emociones y rasgos para generar un perfil psicológico específico.")
