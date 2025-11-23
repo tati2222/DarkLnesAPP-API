@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: tu-app-gradio
+    env: python
+    buildCommand: |
+      rm -rf .venv
+      pip install --upgrade pip
+      pip install --no-cache-dir -r requirements.txt
+    startCommand: python app.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
