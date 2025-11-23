@@ -3,9 +3,10 @@ torch==2.1.0
 torchvision==0.16.0
 pillow
 pandas
---extra-index-url https://download.pytorch.org/whl/cpu
+
 #!/usr/bin/env bash
 # Limpiar cache
 rm -rf .venv
 pip install --upgrade pip
 pip install --no-cache-dir -r requirements.txt
+--extra-index-url https://download.pytorch.org/whl/cpu
