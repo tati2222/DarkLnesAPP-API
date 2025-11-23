@@ -2,16 +2,18 @@
 torch==2.7.0
 torchvision==0.22.0
 
-# Gradio para la interfaz web
-gradio==3.59.2
+# Gradio compatible con Python 3.13
+gradio==3.58.1
 
-# Otros paquetes de tu proyecto
+# Paquetes de ciencia de datos / visión
 numpy==1.25.2
 pandas==2.1.1
 scipy==1.12.2
 matplotlib==3.8.1
 scikit-learn==1.3.2
 opencv-python==4.8.1.78
+
+# Sistema de archivos y utilidades
 fsspec==2025.10.0
 sympy==1.13.1
 triton==3.2.0
