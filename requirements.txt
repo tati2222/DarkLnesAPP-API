@@ -1,5 +1,6 @@
 gradio==4.36.1
-torch==2.3.0
-torchvision==0.18.0
+torch==2.5.1
+torchvision==0.20.1
+huggingface_hub==0.25.1
 Pillow
-numpy
+
