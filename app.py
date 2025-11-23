@@ -2,6 +2,7 @@ import gradio as gr
 import torch
 import torch.nn as nn
 import torchvision.transforms as transforms
+from torchvision.models import efficientnet_b0, EfficientNet_B0_Weights
 from PIL import Image
 import os
 
@@ -12,8 +13,10 @@ import os
 class MicroExpNet(nn.Module):
     def __init__(self):
         super().__init__()
-        self.model = torch.hub.load('pytorch/vision:v0.10.0', 'efficientnet_b0', pretrained=False)
-        self.model.classifier[1] = nn.Linear(self.model.classifier[1].in_features, 7)
+        # Carga del modelo SIN internet (Render safe)
+        self.model = efficientnet_b0(weights=None)
+        in_features = self.model.classifier[1].in_features
+        self.model.classifier[1] = nn.Linear(in_features, 7)
 
     def forward(self, x):
         return self.model(x)
@@ -21,12 +24,10 @@ class MicroExpNet(nn.Module):
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 model = MicroExpNet()
-state = torch.load("microexp_retrained_FER2013.pth", map_location=device)
-new_state = {}
 
-for k, v in state.items():
-    nk = k.replace("model.", "")
-    new_state[nk] = v
+# Cargar pesos entrenados
+state = torch.load("microexp_retrained_FER2013.pth", map_location=device)
+new_state = {k.replace("model.", ""): v for k, v in state.items()}
 
 model.load_state_dict(new_state, strict=False)
 model.to(device)
@@ -44,7 +45,7 @@ transform = transforms.Compose([
 labels = ["Alegría", "Tristeza", "Enojo", "Sorpresa", "Miedo", "Disgusto", "Neutral"]
 
 # --------------------------
-# RELACIÓN CON SD3
+# SD3
 # --------------------------
 
 def compute_sd3(emotions):
@@ -59,7 +60,7 @@ def compute_sd3(emotions):
     }
 
 # --------------------------
-# FUNCIÓN PRINCIPAL
+# ANÁLISIS
 # --------------------------
 
 def analizar(img):
@@ -76,26 +77,14 @@ def analizar(img):
     return emotions, sd3
 
 # --------------------------
-# INTERFAZ GRADIO - DARKLENS
+# INTERFAZ
 # --------------------------
 
 css = """
-body {
-    background: radial-gradient(circle at center, #3a0066, #14001f);
-    color: white !important;
-}
-.gradio-container {
-    background: transparent !important;
-    color: white !important;
-}
-label, .label, .title, h1, h2, h3, p, span {
-    color: white !important;
-}
-button {
-    background: #6a0dad !important;
-    color: white !important;
-    border-radius: 8px !important;
-}
+body { background: radial-gradient(circle at center, #3a0066, #14001f); color: white !important; }
+.gradio-container { background: transparent !important; color: white !important; }
+label, .label, .title, h1, h2, h3, p, span { color: white !important; }
+button { background: #6a0dad !important; color: white !important; border-radius: 8px !important; }
 """
 
 with gr.Blocks(css=css, title="DarkLens") as app:
@@ -106,35 +95,21 @@ with gr.Blocks(css=css, title="DarkLens") as app:
         btn = gr.Button("🔍 Analizar imagen")
 
     with gr.Row():
-        emociones_out = gr.BarPlot(
-            label="Microexpresiones detectadas",
-            x="labels",
-            y="values",
-        )
-
-        sd3_out = gr.BarPlot(
-            label="Rasgos SD3",
-            x="labels",
-            y="values",
-        )
+        emociones_out = gr.BarPlot(label="Microexpresiones detectadas", x="labels", y="values")
+        sd3_out = gr.BarPlot(label="Rasgos SD3", x="labels", y="values")
 
     def process(img):
         emotions, sd3 = analizar(img)
-        emo_labels = list(emotions.keys())
-        emo_values = list(emotions.values())
-
-        sd3_labels = list(sd3.keys())
-        sd3_values = list(sd3.values())
 
         return {
-            emociones_out: {"labels": emo_labels, "values": emo_values},
-            sd3_out: {"labels": sd3_labels, "values": sd3_values}
+            emociones_out: {"labels": list(emotions.keys()), "values": list(emotions.values())},
+            sd3_out: {"labels": list(sd3.keys()), "values": list(sd3.values())}
         }
 
     btn.click(process, inputs=[img_input], outputs=[emociones_out, sd3_out])
 
 # --------------------------
-# 🚀 ARRANQUE PARA RENDER
+# RENDER
 # --------------------------
 
 if __name__ == "__main__":
