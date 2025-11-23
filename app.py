@@ -1,3 +1,8 @@
+# app.py - DarkLens (Streamlit)
+# Versión completa con FAQ, explicación FAC, guardado local y opción Google Sheets.
+# Requisitos (requirements.txt): streamlit, torch, torchvision, pillow, pandas, gspread, google-auth
+# (Instala gspread y google-auth solo si vas a usar la integración con Google Sheets)
+
 import streamlit as st
 import torch
 import torch.nn as nn
@@ -5,16 +10,24 @@ import torchvision.transforms as transforms
 from torchvision.models import efficientnet_b0
 from PIL import Image
 import pandas as pd
+import numpy as np
 import os
+import io
+import datetime
+import json
+
+# Optional imports for Google Sheets (import only if enabled)
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+    GS_AVAILABLE = True
+except Exception:
+    GS_AVAILABLE = False
 
 # --------------------------
-# CONFIGURACIÓN DE PÁGINA
+# CONFIGURACIÓN PÁGINA
 # --------------------------
-st.set_page_config(
-    page_title="DarkLens",
-    page_icon="🟣",
-    layout="wide"
-)
+st.set_page_config(page_title="DarkLens", page_icon="🟣", layout="wide")
 
 # CSS personalizado
 st.markdown("""
@@ -23,7 +36,7 @@ st.markdown("""
         background: radial-gradient(circle at center, #3a0066, #14001f);
     }
     h1, h2, h3, p, label, .stMarkdown {
-        color: white !important;
+        color: #ffffff !important;
     }
     .stButton>button {
         background: #6a0dad !important;
@@ -33,27 +46,27 @@ st.markdown("""
         padding: 0.5rem;
     }
     .conclusion-box {
-        background: rgba(168, 85, 247, 0.2);
+        background: rgba(168, 85, 247, 0.12);
         border-left: 4px solid #a855f7;
-        padding: 1.5rem;
+        padding: 1.25rem;
         border-radius: 8px;
         margin: 1rem 0;
     }
     .emotion-dominant {
-        font-size: 1.5rem;
+        font-size: 1.25rem;
         font-weight: bold;
         color: #a855f7;
     }
     .warning-box {
-        background: rgba(236, 72, 153, 0.2);
+        background: rgba(236, 72, 153, 0.12);
         border-left: 4px solid #ec4899;
-        padding: 1rem;
+        padding: 0.9rem;
         border-radius: 8px;
         margin: 1rem 0;
     }
     .metric-box {
-        background: rgba(255, 255, 255, 0.05);
-        padding: 1rem;
+        background: rgba(255,255,255,0.03);
+        padding: 0.9rem;
         border-radius: 8px;
         margin: 0.5rem 0;
     }
@@ -61,315 +74,431 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --------------------------
-# CARGA DEL MODELO
+# Rutas / Configuraciones
+# --------------------------
+
+# PONER AQUÍ tu modelo si ya lo subiste a /mnt/data o a la raíz del repo
+# Ejemplos:
+# MODEL_PATH = "/content/microexp_retrained_FER2013.pth"
+# MODEL_PATH = "/mnt/data/emotion_model_finetuned (1).keras"  # <-- si tienes el .keras
+MODEL_PATH = "microexp_retrained_FER2013.pth"
+
+# Opcional: ruta al JSON de servicio de Google para subir a Google Sheets
+# Si no usás Sheets deja vacío o comentá la línea.
+GSHEET_CREDENTIALS_PATH = ""  # p.ej. "/path/to/service_account.json"
+GSHEET_NAME = "DarkLens_Results"  # nombre de la hoja (crear o se crea)
+
+# CSV local donde se guardan resultados si quieres
+LOCAL_RESULTS_CSV = "darklens_results.csv"
+
+# --------------------------
+# UTIL: FAC (FACS) mapping (descriptivo)
+# --------------------------
+# Diccionario simple que vincula emoción -> AUs típicos y descripción en lenguaje humano.
+FAC_MAPPING = {
+    "Alegría": {
+        "AUs": ["AU6 (Orbicularis oculi)", "AU12 (Zygomaticus major)"],
+        "descripcion": "Sonrisa genuina: elevación de mejillas y arrugamiento alrededor de los ojos (patas de gallo)."
+    },
+    "Tristeza": {
+        "AUs": ["AU1+4 (Frontalis/Depressor)", "AU15 (Depressor anguli oris)"],
+        "descripcion": "Comisura de los labios hacia abajo, párpados pesados y cejas arqueadas en el centro."
+    },
+    "Enojo": {
+        "AUs": ["AU4 (Brow lowerer)", "AU7 (Lid tightener)", "AU23 (Lip tightener)"],
+        "descripcion": "Ceño fruncido, tensión en la mandíbula y mirada fija/intensa."
+    },
+    "Sorpresa": {
+        "AUs": ["AU1+2 (Inner/Outer brow raiser)", "AU5 (Upper lid raiser)", "AU26 (Jaw drop)"],
+        "descripcion": "Cejas elevadas, ojos muy abiertos y boca ligeramente entreabierta."
+    },
+    "Miedo": {
+        "AUs": ["AU1+2", "AU5", "AU20 (Lip stretcher)"],
+        "descripcion": "Cejas tensas, ojos abiertos y labios tensos; expresión de alerta y retirada."
+    },
+    "Disgusto": {
+        "AUs": ["AU9 (Nose wrinkler)", "AU10 (Upper lip raiser)"],
+        "descripcion": "Arrugamiento de la nariz y elevación del labio superior, como rechazo."
+    },
+    "Neutral": {
+        "AUs": [],
+        "descripcion": "Ausencia de configuraciones faciales marcadas; rostro relajado o controlado."
+    }
+}
+
+# --------------------------
+# MODELO: wrapper general (EfficientNet-B0)
 # --------------------------
 class MicroExpNet(nn.Module):
-    def __init__(self):
+    def __init__(self, num_classes=7):
         super().__init__()
-        self.model = efficientnet_b0(weights=None)
-        in_features = self.model.classifier[1].in_features
-        self.model.classifier[1] = nn.Linear(in_features, 7)
-    
+        self.net = efficientnet_b0(weights=None)
+        in_features = self.net.classifier[1].in_features
+        self.net.classifier[1] = nn.Linear(in_features, num_classes)
     def forward(self, x):
-        return self.model(x)
+        return self.net(x)
 
+# --------------------------
+# CARGA MODELO ROBUSTA
+# --------------------------
 @st.cache_resource
-def cargar_modelo():
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = MicroExpNet()
-    
-    try:
-        # Cargar el state_dict
-        state = torch.load("microexp_retrained_FER2013.pth", map_location=device)
-        
-        # Verificar estructura del state_dict
-        first_key = list(state.keys())[0]
-        
-        if first_key.startswith('model.model.'):
-            # Si tiene doble prefijo "model.model.", quitarlo
-            new_state = {k.replace("model.", "", 1): v for k, v in state.items()}
-            model.load_state_dict(new_state, strict=True)
-            st.success(f"✅ Modelo cargado (formato: model.model.*) en {device}")
-        elif first_key.startswith('model.'):
-            # Si tiene prefijo "model.", quitarlo
-            new_state = {k.replace("model.", ""): v for k, v in state.items()}
-            model.model.load_state_dict(new_state, strict=True)
-            st.success(f"✅ Modelo cargado (formato: model.*) en {device}")
-        else:
-            # Sin prefijo, cargar directo al submodelo
-            model.model.load_state_dict(state, strict=True)
-            st.success(f"✅ Modelo cargado (formato directo) en {device}")
-            
-    except Exception as e:
-        st.error(f"❌ Error al cargar modelo: {str(e)}")
-        st.info("Verifica que el archivo microexp_retrained_FER2013.pth esté en la raíz del proyecto")
-        if 'state' in locals():
-            st.info(f"Primera clave del state_dict: {list(state.keys())[0]}")
-        raise
-    
+def cargar_modelo_robusto(model_path: str):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = MicroExpNet(num_classes=7)
+    model_loaded = False
+    error_message = None
+
+    # Intentar cargar modelos .pth / .pt
+    if os.path.isfile(model_path):
+        lower = model_path.lower()
+        try:
+            if lower.endswith(".pth") or lower.endswith(".pt"):
+                state = torch.load(model_path, map_location=device)
+                # state puede ser: state_dict directo, o checkpoint con 'model_state_dict' u otros prefijos
+                if isinstance(state, dict):
+                    # detectar claves conocidas
+                    # opciones: state_dict directo (key names empiezan por 'net.' o 'model.' o sin prefijo)
+                    keys = list(state.keys())
+                    # si está guardado como checkpoint con 'model_state_dict' o 'state_dict'
+                    if 'model_state_dict' in state:
+                        sd = state['model_state_dict']
+                        model.load_state_dict(sd, strict=False)
+                        model_loaded = True
+                    elif 'state_dict' in state:
+                        sd = state['state_dict']
+                        model.load_state_dict(sd, strict=False)
+                        model_loaded = True
+                    else:
+                        # heurísticos para limpiar posibles prefijos
+                        first_key = keys[0]
+                        sd = state
+                        if first_key.startswith('model.model.') or first_key.startswith('net.'):
+                            # eliminar un prefijo de más si existe
+                            new_sd = {}
+                            for k, v in state.items():
+                                new_key = k
+                                # quitar "model." una sola vez si aparece al inicio
+                                if new_key.startswith('model.'):
+                                    new_key = new_key.replace('model.', '', 1)
+                                if new_key.startswith('net.'):
+                                    new_key = new_key.replace('net.', '', 1)
+                                new_sd[new_key] = v
+                            try:
+                                model.load_state_dict(new_sd, strict=False)
+                                model_loaded = True
+                            except Exception:
+                                # fallback: intentar cargar tal cual
+                                try:
+                                    model.load_state_dict(state, strict=False)
+                                    model_loaded = True
+                                except Exception as e:
+                                    error_message = str(e)
+                        else:
+                            # intento directo
+                            try:
+                                model.load_state_dict(state, strict=False)
+                                model_loaded = True
+                            except Exception as e:
+                                # tal vez el checkpoint tiene pesos en subclave 'model'
+                                # intentar acomodar prefijo 'model.' si las keys del modelo comienzan con 'model.'
+                                try:
+                                    # buscar si keys del modelo comienzan por 'model.' (no común aquí)
+                                    model.load_state_dict(state, strict=False)
+                                    model_loaded = True
+                                except Exception as e2:
+                                    error_message = str(e2)
+                else:
+                    error_message = "El archivo .pth cargado no es un dict reconocible."
+            elif lower.endswith(".keras") or lower.endswith(".h5"):
+                # Intentar cargar keras y convertir a PyTorch no es trivial.
+                # Aquí informamos al usuario cómo proceder: preferible convertir a ONNX o re-entrenar.
+                error_message = ("Modelo Keras detectado (.keras/.h5). "
+                                 "La app espera un .pth de PyTorch. Para usar ese archivo, convértilo a ONNX o guarda un state_dict de PyTorch.")
+            else:
+                error_message = "Formato desconocido. Use un archivo .pth/.pt o convierta a formato compatible."
+        except Exception as e:
+            error_message = str(e)
+    else:
+        error_message = f"No se encontró el archivo de modelo en: {model_path}"
+
+    if not model_loaded:
+        raise RuntimeError(f"Error cargando el modelo: {error_message}")
+
     model.to(device)
     model.eval()
-    
     return model, device
 
-# Cargar modelo al inicio
-model, device = cargar_modelo()
-
 # --------------------------
-# PREPROCESAMIENTO
+# TRANSFORMS Y LABELS
 # --------------------------
 transform = transforms.Compose([
-    transforms.Resize((224, 224)),
+    transforms.Resize((224,224)),
     transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    transforms.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225])
 ])
 
-labels = ["Alegría", "Tristeza", "Enojo", "Sorpresa", "Miedo", "Disgusto", "Neutral"]
+LABELS = ["Alegría", "Tristeza", "Enojo", "Sorpresa", "Miedo", "Disgusto", "Neutral"]
 
 # --------------------------
-# SD3 Y FUNCIONES DE ANÁLISIS
+# FUNCIONES SD3 (simple mapping experimental)
 # --------------------------
-def compute_sd3(emotions):
-    maqu = emotions["Enojo"] * 0.6 + emotions["Disgusto"] * 0.4
-    narc = emotions["Alegría"] * 0.5 + emotions["Neutral"] * 0.5
-    psic = emotions["Miedo"] * 0.7 + emotions["Sorpresa"] * 0.3
-    
+def compute_sd3_from_emotions(emotions: dict):
+    """
+    Función heurística experimental: transforma la distribución de emociones en puntajes SD3.
+    Esta función es exploratoria y debe documentarse como tal en el informe.
+    """
+    maqu = emotions.get("Enojo",0)*0.6 + emotions.get("Disgusto",0)*0.4
+    narc = emotions.get("Alegría",0)*0.5 + emotions.get("Neutral",0)*0.5
+    psic = emotions.get("Miedo",0)*0.7 + emotions.get("Sorpresa",0)*0.3
+    # convertir a escala 0-100
     return {
-        "Maquiavelismo": round(maqu * 100, 2),
-        "Narcisismo": round(narc * 100, 2),
-        "Psicopatía": round(psic * 100, 2)
+        "Maquiavelismo": round(maqu*100,2),
+        "Narcisismo": round(narc*100,2),
+        "Psicopatía": round(psic*100,2)
     }
 
-def analisis_personalidad_completo(emotions, sd3):
-    """Genera un análisis psicológico completo"""
-    
-    # Determinar emoción dominante
-    emocion_dominante = max(emotions.items(), key=lambda x: x[1])
-    emo_nombre, emo_valor = emocion_dominante
-    
-    # Determinar rasgo SD3 dominante
-    rasgo_dominante = max(sd3.items(), key=lambda x: x[1])
-    rasgo_nombre, rasgo_valor = rasgo_dominante
-    
-    # Análisis cruzado: Emoción + Rasgo
-    analisis_cruzado = {
-        # Maquiavelismo
-        ("Enojo", "Maquiavelismo"): "Combinación de enojo y maquiavelismo sugiere una persona estratégica que puede usar la confrontación como herramienta para sus objetivos. Tiende a ser directa cuando le conviene.",
-        ("Neutral", "Maquiavelismo"): "La neutralidad emocional combinada con maquiavelismo indica control calculado. Esta persona oculta sus verdaderas intenciones y mantiene una fachada serena para manipular situaciones.",
-        ("Alegría", "Maquiavelismo"): "La alegría con maquiavelismo puede indicar carisma estratégico. Usa el encanto para influir en otros y lograr sus metas, mostrándose amigable cuando es útil.",
-        ("Disgusto", "Maquiavelismo"): "El disgusto con maquiavelismo sugiere rechazo calculado. Esta persona puede descartar relaciones o situaciones que no le benefician sin remordimientos.",
-        ("Tristeza", "Maquiavelismo"): "La tristeza con maquiavelismo puede ser una máscara estratégica para generar empatía o manipular situaciones a su favor.",
-        ("Sorpresa", "Maquiavelismo"): "La sorpresa con maquiavelismo sugiere adaptabilidad calculada ante situaciones inesperadas.",
-        ("Miedo", "Maquiavelismo"): "El miedo con maquiavelismo indica precaución estratégica y evaluación de riesgos antes de actuar.",
-        
-        # Narcisismo
-        ("Alegría", "Narcisismo"): "Alegría narcisista refleja autoestima elevada y búsqueda de admiración. La felicidad está ligada al reconocimiento externo y la validación constante.",
-        ("Sorpresa", "Narcisismo"): "Sorpresa narcisista puede indicar reacciones dramáticas. Esta persona amplifica sus respuestas emocionales para llamar la atención y ser el centro de las situaciones.",
-        ("Enojo", "Narcisismo"): "Enojo narcisista sugiere 'ira narcisista' - reacciones intensas ante críticas o falta de reconocimiento. El ego herido genera respuestas desproporcionadas.",
-        ("Neutral", "Narcisismo"): "Neutralidad narcisista puede reflejar frialdad calculada. Mantiene distancia emocional para proyectar superioridad y control sobre otros.",
-        ("Tristeza", "Narcisismo"): "La tristeza narcisista puede indicar depresión relacionada con falta de validación externa o heridas al ego.",
-        ("Disgusto", "Narcisismo"): "El disgusto narcisista sugiere desprecio hacia quienes no reconocen su superioridad percibida.",
-        ("Miedo", "Narcisismo"): "El miedo narcisista puede reflejar temor al rechazo, crítica o pérdida de estatus social.",
-        
-        # Psicopatía
-        ("Neutral", "Psicopatía"): "Neutralidad psicopática indica aplanamiento afectivo. Baja reactividad emocional, procesamiento frío de situaciones, y dificultad para conectar emocionalmente.",
-        ("Alegría", "Psicopatía"): "Alegría psicopática puede ser superficial y calculada. Las expresiones positivas no reflejan conexión emocional genuina, sino respuestas aprendidas socialmente.",
-        ("Miedo", "Psicopatía"): "Miedo con psicopatía es inusual - puede indicar ansiedad situacional sin procesamiento emocional profundo. La respuesta es más cognitiva que afectiva.",
-        ("Sorpresa", "Psicopatía"): "Sorpresa psicopática refleja reactividad baja. Incluso situaciones inesperadas generan respuestas emocionales atenuadas, manteniendo el control.",
-        ("Enojo", "Psicopatía"): "El enojo psicopático tiende a ser instrumental y controlado, usado como herramienta más que como emoción genuina.",
-        ("Tristeza", "Psicopatía"): "La tristeza psicopática es rara y superficial, sin la profundidad emocional típica de esta emoción.",
-        ("Disgusto", "Psicopatía"): "El disgusto psicopático puede manifestarse como indiferencia fría ante situaciones que otros encontrarían repulsivas.",
-    }
-    
-    # Buscar combinación específica
-    clave = (emo_nombre, rasgo_nombre)
-    analisis_especifico = analisis_cruzado.get(
-        clave,
-        f"La combinación de {emo_nombre.lower()} con {rasgo_nombre.lower()} elevado sugiere un perfil emocional complejo que requiere análisis más profundo en contexto clínico."
-    )
-    
-    # Nivel de intensidad
-    if rasgo_valor > 60:
-        nivel = "MARCADO"
-        color = "🔴"
-    elif rasgo_valor > 40:
-        nivel = "MODERADO"
-        color = "🟡"
+# --------------------------
+# EXPLICACIÓN FAC basada en la predicción
+# --------------------------
+def explain_fac(emotions: dict):
+    # emoción dominante
+    dominant = max(emotions.items(), key=lambda x: x[1])
+    emo_name, emo_prob = dominant
+    mapping = FAC_MAPPING.get(emo_name, {})
+    aus = mapping.get("AUs", [])
+    desc = mapping.get("descripcion", "Descripción no disponible.")
+    # preparar texto explicativo
+    texto = f"La microexpresión dominante es **{emo_name}** ({emo_prob*100:.1f}%).\n\n"
+    texto += f"{desc}\n\n"
+    if aus:
+        texto += "Unidades de acción (AUs) implicadas: " + ", ".join(aus) + "."
     else:
-        nivel = "LEVE"
-        color = "🟢"
-    
-    return {
-        "emocion_dominante": emo_nombre,
-        "emocion_valor": emo_valor,
-        "rasgo_dominante": rasgo_nombre,
-        "rasgo_valor": rasgo_valor,
-        "nivel_intensidad": nivel,
-        "color_nivel": color,
-        "analisis_especifico": analisis_especifico
-    }
-
-def interpretar_sd3_detallado(sd3):
-    """Genera interpretación detallada de cada rasgo SD3"""
-    interpretaciones = []
-    
-    for rasgo, valor in sd3.items():
-        if valor > 60:
-            nivel = "Alto"
-            color = "🔴"
-        elif valor > 40:
-            nivel = "Moderado"
-            color = "🟡"
-        else:
-            nivel = "Bajo"
-            color = "🟢"
-        
-        descripciones = {
-            "Maquiavelismo": {
-                "Alto": "Tendencia marcada a manipulación estratégica, enfoque pragmático sobre ético, y habilidad para usar a otros como medios para fines.",
-                "Moderado": "Balance entre pragmatismo y consideración ética. Puede ser estratégico sin caer en manipulación extrema.",
-                "Bajo": "Enfoque honesto y directo en interacciones. Valora la transparencia sobre la estrategia."
-            },
-            "Narcisismo": {
-                "Alto": "Autoestima inflada, búsqueda constante de admiración, y dificultad para aceptar críticas. El ego es central en las interacciones.",
-                "Moderado": "Confianza personal equilibrada con cierta necesidad de validación externa. Autoestima saludable en general.",
-                "Bajo": "Humildad genuina y consideración hacia otros. Baja necesidad de reconocimiento constante."
-            },
-            "Psicopatía": {
-                "Alto": "Baja reactividad emocional, alta impulsividad, dificultad para empatía profunda. Procesamiento frío de situaciones sociales.",
-                "Moderado": "Control emocional equilibrado con capacidad de conexión emocional moderada. Puede parecer distante en situaciones estresantes.",
-                "Bajo": "Alta empatía, fuerte conexión emocional, y procesamiento afectivo profundo de experiencias."
-            }
-        }
-        
-        interpretaciones.append({
-            "rasgo": rasgo,
-            "valor": valor,
-            "nivel": nivel,
-            "color": color,
-            "descripcion": descripciones[rasgo][nivel]
-        })
-    
-    return interpretaciones
+        texto += "No se identifican AUs claramente en 'Neutral'."
+    return texto, emo_name, emo_prob, aus
 
 # --------------------------
-# ANÁLISIS
+# GUARDAR & SUBIR (Google Sheets opcional)
 # --------------------------
-def analizar(image):
-    tensor = transform(image).unsqueeze(0).to(device)
-    
+def save_result_local(record: dict, csv_path=LOCAL_RESULTS_CSV):
+    df = pd.DataFrame([record])
+    if not os.path.exists(csv_path):
+        df.to_csv(csv_path, index=False)
+    else:
+        df.to_csv(csv_path, mode='a', header=False, index=False)
+
+def upload_to_gsheets(record: dict, credentials_path: str, sheet_name: str):
+    if not GS_AVAILABLE:
+        raise RuntimeError("gspread / google-auth no están instalados en este entorno.")
+    if not os.path.isfile(credentials_path):
+        raise RuntimeError("No se encontró el archivo de credenciales JSON.")
+    creds = Credentials.from_service_account_file(credentials_path, scopes=["https://www.googleapis.com/auth/spreadsheets"])
+    gc = gspread.authorize(creds)
+    try:
+        sh = gc.open(sheet_name)
+    except Exception:
+        sh = gc.create(sheet_name)
+        # compartir la hoja si es necesario (requiere permisos de cuenta)
+    worksheet = sh.sheet1
+    # escribir encabezados si vacía
+    headers = worksheet.row_values(1)
+    if not headers:
+        worksheet.append_row(list(record.keys()))
+    worksheet.append_row(list(record.values()))
+
+# --------------------------
+# PREDICCIÓN
+# --------------------------
+def predict_from_image(img_pil: Image.Image, model, device):
+    img = img_pil.convert("RGB")
+    tensor = transform(img).unsqueeze(0).to(device)
     with torch.no_grad():
-        out = model(tensor)
+        out = model(tensor)  # logits
         probs = torch.softmax(out, dim=1)[0].cpu().numpy()
-    
-    emotions = {labels[i]: float(probs[i]) for i in range(7)}
-    sd3 = compute_sd3(emotions)
-    
-    return emotions, sd3
+    # mapear a etiquetas
+    emotions = {LABELS[i]: float(probs[i]) for i in range(len(LABELS))}
+    return emotions
 
 # --------------------------
-# INTERFAZ
+# CARGAR MODELO AL INICIO (intentar y mostrar info)
+# --------------------------
+# Intentamos cargar al ejecutar la app
+model_load_error = None
+model = None
+device = None
+try:
+    model, device = cargar_modelo_robusto(MODEL_PATH)
+    st.sidebar.success(f"Modelo cargado desde: {MODEL_PATH} (device: {device})")
+except Exception as e:
+    model_load_error = str(e)
+    st.sidebar.error("No se pudo cargar el modelo. Revisa MODEL_PATH en app.py y el formato del archivo.")
+    st.sidebar.write(model_load_error)
+
+# --------------------------
+# INTERFAZ PRINCIPAL
 # --------------------------
 st.markdown("<h1 style='text-align:center;'>🟣 DarkLens — Detector de Microexpresiones</h1>", unsafe_allow_html=True)
 
-uploaded_file = st.file_uploader("Subí una imagen", type=['png', 'jpg', 'jpeg'])
+# Palabras clave (keywords) para el informe
+st.sidebar.markdown("**Palabras clave:** microexpresiones, SD3, Dark Triad, visión computacional, FACS, ética de datos")
 
-if uploaded_file is not None:
-    image = Image.open(uploaded_file)
+# Sección FAQ integrada
+with st.expander("❓ FAQ / Preguntas frecuentes (ver antes de usar)"):
+    st.markdown("""
+    **¿Qué hace DarkLens?**  
+    *DarkLens procesa una imagen facial con un modelo pre-entrenado y devuelve la microexpresión predominante (7 clases),
+    además de una transformación heurística experimental hacia puntajes SD3. Esto es exploratorio y no diagnóstico.*
     
-    col1, col2, col3 = st.columns([1, 2, 1])
+    **¿Puedo usar esto para diagnosticar a una persona?**  
+    No. DarkLens no es una herramienta clínica ni forense. Sus salidas son probabilísticas y deben interpretarse en contexto.
+    
+    **¿Dónde se guardan las imágenes?**  
+    Por defecto las imágenes no se guardan. Si se activa la opción, se guardan solo metadatos (timestamp, predicciones) en un CSV local.
+    
+    **¿Cómo conectar a Google Sheets?**  
+    Subí el JSON de servicio a la raíz del proyecto y pon la ruta en la variable `GSHEET_CREDENTIALS_PATH` en app.py.
+    Asegurate de que la cuenta de servicio tenga permisos para crear/editar la hoja.
+    
+    **¿Por qué los resultados pueden ser erráticos?**  
+    Microexpresiones son sutiles y dependen de la calidad de la foto, iluminación, pose y diversidad cultural. Este sistema es exploratorio.
+    """)
+
+st.markdown("---")
+
+uploaded_file = st.file_uploader("Subí una imagen (png/jpg/jpeg)", type=['png','jpg','jpeg'])
+col1, col2 = st.columns([1,2])
+
+if uploaded_file:
+    try:
+        image = Image.open(uploaded_file)
+    except Exception as e:
+        st.error("Error al abrir la imagen. Asegurate de subir un archivo válido.")
+        image = None
+else:
+    image = None
+
+if image is not None:
     with col2:
-        st.image(image, caption='Imagen cargada', use_column_width=True)
-    
-    if st.button('🔍 Analizar imagen'):
-        with st.spinner('Analizando microexpresiones...'):
-            emotions, sd3 = analizar(image)
-        
-        st.success('✅ Análisis completado!')
-        
-        # ANÁLISIS COMPLETO
-        analisis = analisis_personalidad_completo(emotions, sd3)
-        
-        st.markdown(f"""
-        <div class="conclusion-box">
-            <h2>🔬 Análisis Psicológico Completo</h2>
-            <p class="emotion-dominant">
-                Perfil Detectado: {analisis['emocion_dominante']} ({analisis['emocion_valor']*100:.1f}%) 
-                + {analisis['rasgo_dominante']} ({analisis['rasgo_valor']:.1f}%)
-            </p>
-            <p><strong>Intensidad del rasgo:</strong> {analisis['color_nivel']} {analisis['nivel_intensidad']}</p>
-            <hr style="border-color: rgba(255,255,255,0.3); margin: 1rem 0;">
-            <h3>💡 Interpretación Específica:</h3>
-            <p style="font-size: 1.1rem; line-height: 1.8;">{analisis['analisis_especifico']}</p>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        # Gráficos en columnas
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader("📊 Microexpresiones detectadas")
-            df_emotions = pd.DataFrame({
-                'Emoción': list(emotions.keys()),
-                'Probabilidad': list(emotions.values())
-            })
-            st.bar_chart(df_emotions.set_index('Emoción'))
-            
-            st.write("**Valores detallados:**")
-            for emo, val in sorted(emotions.items(), key=lambda x: x[1], reverse=True):
-                st.write(f"- **{emo}**: {val*100:.2f}%")
-        
-        with col2:
-            st.subheader("🧠 Rasgos SD3 (Dark Triad)")
-            df_sd3 = pd.DataFrame({
-                'Rasgo': list(sd3.keys()),
-                'Puntuación': list(sd3.values())
-            })
-            st.bar_chart(df_sd3.set_index('Rasgo'))
-            
-            st.write("**Valores:**")
-            for rasgo, val in sorted(sd3.items(), key=lambda x: x[1], reverse=True):
-                st.write(f"- **{rasgo}**: {val:.2f}%")
-        
-        # INTERPRETACIÓN SD3 DETALLADA
-        st.markdown("---")
-        st.markdown("### 🔍 Interpretación Detallada de Rasgos SD3")
-        
-        interpretaciones_sd3 = interpretar_sd3_detallado(sd3)
-        for interp in interpretaciones_sd3:
-            st.markdown(f"""
-            <div class="metric-box">
-                <h4>{interp['color']} {interp['rasgo']}: {interp['nivel']} ({interp['valor']:.1f}%)</h4>
-                <p style="margin-top: 0.5rem;">{interp['descripcion']}</p>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        # ADVERTENCIA
-        st.markdown("""
-        <div class="warning-box">
-            <strong>⚠️ Nota Importante:</strong> Este análisis es orientativo y basado en microexpresiones faciales. 
-            No debe usarse como diagnóstico clínico ni para tomar decisiones importantes sobre personas. 
-            Los rasgos SD3 son constructos psicológicos que existen en un continuo y requieren evaluación profesional.
-        </div>
-        """, unsafe_allow_html=True)
+        st.image(image, caption="Imagen cargada", use_column_width=True)
+
+    # Opciones de procesamiento
+    col_opt1, col_opt2, col_opt3 = st.columns([1,1,1])
+    with col_opt1:
+        save_local_checkbox = st.checkbox("Guardar resultado localmente (CSV)", value=True)
+    with col_opt2:
+        enable_gs_checkbox = st.checkbox("Subir resultados a Google Sheets (configurar credenciales)", value=False)
+    with col_opt3:
+        show_fac = st.checkbox("Mostrar explicación FAC (AUs)", value=True)
+
+    if st.button("🔍 Analizar imagen"):
+        if model is None:
+            st.error("El modelo no está cargado. Revisa el sidebar y la variable MODEL_PATH.")
+        else:
+            with st.spinner("Analizando..."):
+                emotions = predict_from_image(image, model, device)
+                sd3 = compute_sd3_from_emotions(emotions)
+                fac_text, emo_name, emo_prob, aus = explain_fac(emotions)
+
+                # Mostrar resultados
+                st.success("✅ Análisis completado")
+                # Panel de resultado principal
+                st.markdown(f"""
+                <div class="conclusion-box">
+                    <h2>🔬 Resultado principal</h2>
+                    <p class="emotion-dominant">Microexpresión predominante: <strong>{emo_name}</strong> ({emo_prob*100:.1f}%)</p>
+                    <p><strong>Rasgo SD3 predominante (heurístico):</strong> {max(sd3, key=sd3.get)} ({sd3[max(sd3, key=sd3.get)]:.1f}%)</p>
+                </div>
+                """, unsafe_allow_html=True)
+
+                # Explicación FAC
+                if show_fac:
+                    st.markdown("### 🔎 Explicación FAC (interpretación basada en AUs)")
+                    st.markdown(fac_text)
+
+                # Gráficos y tablas
+                st.markdown("---")
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.subheader("📊 Probabilidades (microexpresiones)")
+                    df_em = pd.DataFrame({
+                        "Emoción": list(emotions.keys()),
+                        "Probabilidad": list(emotions.values())
+                    })
+                    df_plot = df_em.set_index("Emoción")
+                    st.bar_chart(df_plot)
+                    st.write(df_em.sort_values("Probabilidad", ascending=False).assign(Probabilidad=lambda d: d["Probabilidad"]*100).rename(columns={"Probabilidad":"%"}))
+                with c2:
+                    st.subheader("🧾 SD3 (heurístico)")
+                    df_sd3 = pd.DataFrame({
+                        "Rasgo": list(sd3.keys()),
+                        "Puntaje": list(sd3.values())
+                    }).set_index("Rasgo")
+                    st.bar_chart(df_sd3)
+                    st.write(df_sd3)
+
+                # Interpretación textual breve
+                st.markdown("### 🧩 Interpretación breve (automática)")
+                # Reusar la función de análisis cruzado (puedes expandir con más reglas)
+                # Aquí devolvemos un texto simple derivado de la emoción + SD3 dominante
+                emoc_dom = emo_name
+                ras_dom = max(sd3, key=sd3.get)
+                interpretation = f"La microexpresión mayoritaria es **{emoc_dom}** y el rasgo SD3 con mayor puntaje es **{ras_dom}**. Esto sugiere una posible relación entre la expresión involuntaria detectada y tendencias de personalidad (esta interpretación es exploratoria y no clínica)."
+                st.info(interpretation)
+
+                # Guardar resultado (registro)
+                timestamp = datetime.datetime.utcnow().isoformat()
+                record = {
+                    "timestamp_utc": timestamp,
+                    "file_name": getattr(uploaded_file, "name", "uploaded_image"),
+                    **{f"prob_{k}": float(v) for k, v in emotions.items()},
+                    **{f"sd3_{k}": float(v) for k, v in sd3.items()},
+                    "dominant_emotion": emo_name,
+                    "dominant_emotion_prob": float(emo_prob)
+                }
+
+                if save_local_checkbox:
+                    try:
+                        save_result_local(record, LOCAL_RESULTS_CSV)
+                        st.success(f"Resultado guardado localmente en `{LOCAL_RESULTS_CSV}`")
+                    except Exception as e:
+                        st.error(f"No se pudo guardar localmente: {e}")
+
+                if enable_gs_checkbox:
+                    if GSHEET_CREDENTIALS_PATH and GS_AVAILABLE:
+                        try:
+                            upload_to_gsheets(record, GSHEET_CREDENTIALS_PATH, GSHEET_NAME)
+                            st.success("Resultado subido a Google Sheets correctamente.")
+                        except Exception as e:
+                            st.error(f"Error subiendo a Google Sheets: {e}")
+                    else:
+                        st.error("Subida a Google Sheets no activada. Revisa GSHEET_CREDENTIALS_PATH y las librerías instaladas.")
+
+                # Advertencia ética
+                st.markdown("---")
+                st.markdown("""
+                <div class="warning-box">
+                    <strong>⚠️ Nota importante:</strong> Esta aplicación proporciona una evaluación exploratoria basada en datos visuales y heurísticos derivados del SD3. 
+                    No debe usarse para diagnóstico ni para tomar decisiones que afecten a las personas. Los resultados son probabilísticos y dependen de la calidad de la imagen, el contexto cultural y las limitaciones del modelo.
+                </div>
+                """, unsafe_allow_html=True)
 
 else:
     st.info("👆 Sube una imagen para comenzar el análisis")
-    
-    # Información adicional
     st.markdown("---")
     st.markdown("### 🎯 ¿Qué hace esta aplicación?")
-    
     col1, col2, col3 = st.columns(3)
-    
     with col1:
-        st.markdown("#### 😊 Detección de Emociones")
-        st.write("Identifica 7 emociones básicas: Alegría, Tristeza, Enojo, Sorpresa, Miedo, Disgusto y Neutral.")
-    
+        st.markdown("#### 😊 Detección de Microexpresiones")
+        st.write("Identifica 7 clases: Alegría, Tristeza, Enojo, Sorpresa, Miedo, Disgusto y Neutral.")
     with col2:
-        st.markdown("#### 🧠 Análisis SD3")
-        st.write("Evalúa tres rasgos de personalidad oscura: Maquiavelismo, Narcisismo y Psicopatía.")
-    
+        st.markdown("#### 🧠 SD3 (heurístico)")
+        st.write("Convierte la distribución de emociones en puntajes exploratorios de Maquiavelismo, Narcisismo y Psicopatía.")
     with col3:
-        st.markdown("#### 🔬 Interpretación Cruzada")
-        st.write("Combina emociones y rasgos para generar un perfil psicológico específico.")
+        st.markdown("#### 🔬 Explicación FAC")
+        st.write("Proporciona una interpretación basada en unidades de acción facial (AUs) típicas por emoción.")
+
+# --------------------------
+# FOOTER: enlaces / ayuda rápida
+# --------------------------
+st.markdown("---")
+st.markdown("**Documentación rápida:** Si quieres integrar a Google Sheets sube el JSON de servicio y fija `GSHEET_CREDENTIALS_PATH` en app.py. Para convertir archivos Keras a PyTorch, conviene exportar a ONNX o re-entrenar en PyTorch y guardar `state_dict()` como .pth.")
+st.markdown("**Responsabilidad:** DarkLens es una herramienta experimental de investigación. No reemplaza evaluación clínica ni diagnóstico profesional.")
