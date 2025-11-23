@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torchvision.transforms as transforms
 from PIL import Image
+import os
 
 # --------------------------
 #   CARGA DEL MODELO
@@ -47,7 +48,6 @@ labels = ["Alegría", "Tristeza", "Enojo", "Sorpresa", "Miedo", "Disgusto", "Neu
 # --------------------------
 
 def compute_sd3(emotions):
-    # Valores ficticios, tú puedes afinarlos luego
     maqu = emotions["Enojo"] * 0.6 + emotions["Disgusto"] * 0.4
     narc = emotions["Alegría"] * 0.5 + emotions["Neutral"] * 0.5
     psic = emotions["Miedo"] * 0.7 + emotions["Sorpresa"] * 0.3
@@ -74,7 +74,6 @@ def analizar(img):
     sd3 = compute_sd3(emotions)
 
     return emotions, sd3
-
 
 # --------------------------
 # INTERFAZ GRADIO - DARKLENS
@@ -134,4 +133,10 @@ with gr.Blocks(css=css, title="DarkLens") as app:
 
     btn.click(process, inputs=[img_input], outputs=[emociones_out, sd3_out])
 
-app.launch()
+# --------------------------
+# 🚀 ARRANQUE PARA RENDER
+# --------------------------
+
+if __name__ == "__main__":
+    PORT = int(os.environ.get("PORT", 7860))
+    app.launch(server_name="0.0.0.0", server_port=PORT)
