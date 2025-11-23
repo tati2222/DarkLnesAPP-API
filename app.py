@@ -38,32 +38,38 @@ st.markdown("""
 # --------------------------
 # CARGA DEL MODELO
 # --------------------------
-class MicroExpNet(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.model = efficientnet_b0(weights=None)
-        in_features = self.model.classifier[1].in_features
-        self.model.classifier[1] = nn.Linear(in_features, 7)
-    
-    def forward(self, x):
-        return self.model(x)
-
 @st.cache_resource
 def cargar_modelo():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = MicroExpNet()
     
-    # Cargar pesos entrenados
-    state = torch.load("microexp_retrained_FER2013.pth", map_location=device)
-    new_state = {k.replace("model.", ""): v for k, v in state.items()}
-    model.load_state_dict(new_state, strict=False)
+    try:
+        # Intentar cargar directamente
+        state = torch.load("microexp_retrained_FER2013.pth", map_location=device)
+        
+        # Verificar estructura del state_dict
+        if 'model.model.features.0.0.weight' in state:
+            # Si tiene prefijo "model.", quitarlo
+            new_state = {k.replace("model.", ""): v for k, v in state.items()}
+            model.load_state_dict(new_state, strict=True)
+        elif 'model.features.0.0.weight' in state:
+            # Si tiene estructura normal
+            model.model.load_state_dict(state, strict=True)
+        else:
+            # Intentar cargar directamente
+            model.load_state_dict(state, strict=True)
+            
+        st.success(f"✅ Modelo cargado correctamente en {device}")
+        
+    except Exception as e:
+        st.error(f"❌ Error al cargar modelo: {str(e)}")
+        st.info("Verifica que el archivo microexp_retrained_FER2013.pth esté en la raíz del proyecto")
+        raise
+    
     model.to(device)
     model.eval()
     
     return model, device
-
-model, device = cargar_modelo()
-
 # --------------------------
 # PREPROCESAMIENTO
 # --------------------------
@@ -77,15 +83,60 @@ labels = ["Alegría", "Tristeza", "Enojo", "Sorpresa", "Miedo", "Disgusto", "Neu
 # --------------------------
 # SD3
 # --------------------------
-def compute_sd3(emotions):
-    maqu = emotions["Enojo"] * 0.6 + emotions["Disgusto"] * 0.4
-    narc = emotions["Alegría"] * 0.5 + emotions["Neutral"] * 0.5
-    psic = emotions["Miedo"] * 0.7 + emotions["Sorpresa"] * 0.3
+def analisis_personalidad_completo(emotions, sd3):
+    """Genera un análisis psicológico completo"""
+    
+    # Determinar emoción dominante
+    emocion_dominante = max(emotions.items(), key=lambda x: x[1])
+    emo_nombre, emo_valor = emocion_dominante
+    
+    # Determinar rasgo SD3 dominante
+    rasgo_dominante = max(sd3.items(), key=lambda x: x[1])
+    rasgo_nombre, rasgo_valor = rasgo_dominante
+    
+    # Análisis cruzado: Emoción + Rasgo
+    analisis_cruzado = {
+        # Maquiavelismo
+        ("Enojo", "Maquiavelismo"): "Combinación de enojo y maquiavelismo sugiere una persona estratégica que puede usar la confrontación como herramienta para sus objetivos. Tiende a ser directa cuando le conviene.",
+        ("Neutral", "Maquiavelismo"): "La neutralidad emocional combinada con maquiavelismo indica control calculado. Esta persona oculta sus verdaderas intenciones y mantiene una fachada serena para manipular situaciones.",
+        ("Alegría", "Maquiavelismo"): "La alegría con maquiavelismo puede indicar carisma estratégico. Usa el encanto para influir en otros y lograr sus metas, mostrándose amigable cuando es útil.",
+        ("Disgusto", "Maquiavelismo"): "El disgusto con maquiavelismo sugiere rechazo calculado. Esta persona puede descartar relaciones o situaciones que no le benefician sin remordimientos.",
+        
+        # Narcisismo
+        ("Alegría", "Narcisismo"): "Alegría narcisista refleja autoestima elevada y búsqueda de admiración. La felicidad está ligada al reconocimiento externo y la validación constante.",
+        ("Sorpresa", "Narcisismo"): "Sorpresa narcisista puede indicar reacciones dramáticas. Esta persona amplifica sus respuestas emocionales para llamar la atención y ser el centro de las situaciones.",
+        ("Enojo", "Narcisismo"): "Enojo narcisista sugiere 'ira narcisista' - reacciones intensas ante críticas o falta de reconocimiento. El ego herido genera respuestas desproporcionadas.",
+        ("Neutral", "Narcisismo"): "Neutralidad narcisista puede reflejar frialdad calculada. Mantiene distancia emocional para proyectar superioridad y control sobre otros.",
+        
+        # Psicopatía
+        ("Neutral", "Psicopatía"): "Neutralidad psicopática indica aplanamiento afectivo. Baja reactividad emocional, procesamiento frío de situaciones, y dificultad para conectar emocionalmente.",
+        ("Alegría", "Psicopatía"): "Alegría psicopática puede ser superficial y calculada. Las expresiones positivas no reflejan conexión emocional genuina, sino respuestas aprendidas socialmente.",
+        ("Miedo", "Psicopatía"): "Miedo con psicopatía es inusual - puede indicar ansiedad situacional sin procesamiento emocional profundo. La respuesta es más cognitiva que afectiva.",
+        ("Sorpresa", "Psicopatía"): "Sorpresa psicopática refleja reactividad baja. Incluso situaciones inesperadas generan respuestas emocionales atenuadas, manteniendo el control.",
+    }
+    
+    # Buscar combinación específica
+    clave = (emo_nombre, rasgo_nombre)
+    analisis_especifico = analisis_cruzado.get(
+        clave,
+        f"La combinación de {emo_nombre.lower()} y {rasgo_nombre.lower()} sugiere un perfil emocional complejo que requiere análisis más profundo."
+    )
+    
+    # Nivel de intensidad
+    if rasgo_valor > 60:
+        nivel = "marcado"
+    elif rasgo_valor > 40:
+        nivel = "moderado"
+    else:
+        nivel = "leve"
     
     return {
-        "Maquiavelismo": round(maqu * 100, 2),
-        "Narcisismo": round(narc * 100, 2),
-        "Psicopatía": round(psic * 100, 2)
+        "emocion_dominante": emo_nombre,
+        "emocion_valor": emo_valor * 100,
+        "rasgo_dominante": rasgo_nombre,
+        "rasgo_valor": rasgo_valor,
+        "nivel_intensidad": nivel,
+        "analisis_especifico": analisis_especifico
     }
 
 # --------------------------
