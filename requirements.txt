@@ -1,5 +1,5 @@
-gradio
-torch
-torchvision
-huggingface_hub
+gradio==4.36.1
+torch==2.3.0
+torchvision==0.18.0
 Pillow
+numpy
