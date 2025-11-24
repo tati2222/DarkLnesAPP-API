@@ -1,7 +1,15 @@
+streamlit==1.32.0
+torch==2.2.0
+torchvision==0.17.0
+
+pillow==10.2.0
+pandas==2.2.1
+
+# Para procesamiento de imágenes
+opencv-python-headless==4.9.0.80
+
+# Dependencias comunes de scientific computing
 numpy==1.26.4
-streamlit==1.39.0
-torch==2.1.0
-torchvision==0.16.0
-pillow
-pandas
---extra-index-url https://download.pytorch.org/whl/cpu
+
+# Estandar para evitar errores de certificados en requests
+requests==2.31.0
