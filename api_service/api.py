@@ -102,7 +102,16 @@ async def run_predict(file: UploadFile = File(...)):
         "sd3": sd3
     }
 
-# AGREGA ESTO AL FINAL DE TU ARCHIVO api.py
+# AGREGA ESTO A TU api.py - ANTES del if __name__...
+
+@app.get("/")
+async def health_check():
+    return {"status": "healthy", "message": "DarkLnes API running"}
+
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "message": "DarkLnes API running"}
+    
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
