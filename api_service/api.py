@@ -101,3 +101,8 @@ async def run_predict(file: UploadFile = File(...)):
         "emociones": emotions,
         "sd3": sd3
     }
+
+# AGREGA ESTO AL FINAL DE TU ARCHIVO api.py
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
