@@ -68,23 +68,6 @@ except Exception as e:
     modelo_emociones_cargado = False
 
 # -----------------------------------------------------
-# CONFIGURACIÓN FACS (SECUNDARIO - SIMULADO SI FALLA)
-# -----------------------------------------------------
-try:
-    # Intentar importar Py-Feat (opcional)
-    import pyfeat
-    from pyfeat import Detector
-    detector_facs = Detector(device='cpu')
-    modelo_facs_cargado = True
-    logger.info("✅ Py-Feat disponible para análisis FACS")
-except ImportError:
-    logger.warning("⚠️ Py-Feat no disponible, usando FACS simulado")
-    modelo_facs_cargado = False
-except Exception as e:
-    logger.warning(f"⚠️ Error cargando Py-Feat: {e}, usando FACS simulado")
-    modelo_facs_cargado = False
-
-# -----------------------------------------------------
 # PREPROCESAMIENTO
 # -----------------------------------------------------
 transform = transforms.Compose([
