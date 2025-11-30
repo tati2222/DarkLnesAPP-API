@@ -68,6 +68,12 @@ except Exception as e:
     modelo_emociones_cargado = False
 
 # -----------------------------------------------------
+# CONFIGURACIÓN FACS (USANDO SISTEMA SIMULADO)
+# -----------------------------------------------------
+modelo_facs_cargado = False
+logger.info("✅ Usando sistema FACS simulado (pyfeat no compatible con Python 3.13)")
+
+# -----------------------------------------------------
 # PREPROCESAMIENTO
 # -----------------------------------------------------
 transform = transforms.Compose([
