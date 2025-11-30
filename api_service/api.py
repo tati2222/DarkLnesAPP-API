@@ -140,47 +140,13 @@ async def analyze_frame_emociones(frame: np.ndarray) -> Dict[str, Any]:
         return generate_fallback_analysis()
 
 async def analyze_frame_facs(frame: np.ndarray) -> Dict[str, Any]:
-    """Analiza un frame usando Py-Feat para FACS (si está disponible)"""
-    try:
-        if not modelo_facs_cargado:
-            return {"facs_disponible": False, "aus": [], "landmarks": []}
-        
-        # Convertir numpy array a formato compatible con Py-Feat
-        result = detector_facs.detect_image(frame)
-        
-        facs_data = []
-        aus_detectadas = []
-        
-        if result['faces'] is not None and len(result['faces']) > 0:
-            # Extraer AUs y landmarks
-            aus = result['aus'][0] if result['aus'] is not None else []
-            landmarks = result['landmarks'][0] if result['landmarks'] is not None else []
-            
-            # Convertir AUs a formato legible
-            for i, au_intensity in enumerate(aus):
-                if au_intensity > 0.1:  # Threshold para considerar AU activa
-                    au_name = f"AU{i+1}"
-                    facs_data.append({
-                        "unidad": au_name,
-                        "nombre": get_au_name(au_name),
-                        "intensidad": float(au_intensity),
-                        "descripcion": get_au_description(au_name)
-                    })
-                    aus_detectadas.append(au_name)
-            
-            return {
-                "facs_disponible": True,
-                "aus": facs_data,
-                "aus_detectadas": aus_detectadas,
-                "landmarks": landmarks.tolist() if landmarks is not None else [],
-                "modelo_utilizado": "Py-Feat"
-            }
-        else:
-            return {"facs_disponible": False, "aus": [], "landmarks": []}
-            
-    except Exception as e:
-        logger.error(f"Error en análisis FACS: {e}")
-        return {"facs_disponible": False, "aus": [], "landmarks": []}
+    """Analiza un frame usando FACS simulado"""
+    return {
+        "facs_disponible": False, 
+        "aus": [], 
+        "landmarks": [],
+        "modelo_utilizado": "Simulado"
+    }
 
 def get_au_name(au_code: str) -> str:
     """Obtiene el nombre descriptivo de una Action Unit"""
