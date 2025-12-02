@@ -1,10 +1,26 @@
-fastapi
-uvicorn
-python-multipart
-pydantic
-numpy==1.23.5
-scipy==1.10.1
+fastapi==0.110.0
+uvicorn==0.29.0
+python-multipart==0.0.9
+pydantic==2.6.1
+
+# PyTorch CPU (compatible con Python 3.10)
+torch==2.0.1
+torchvision==0.15.2
+
+# Procesamiento de imágenes
 opencv-python-headless==4.8.1.78
-Pillow
-torch==2.1.0
-torchvision==0.16.0
+numpy==1.24.4
+pillow==10.2.0
+
+# Modelos / utils
+scikit-learn==1.3.2
+
+# Para CORS
+starlette==0.37.2
+
+# Para Supabase (si lo usás desde la API)
+supabase==2.4.3
+
+# Evita build failures
+setuptools==68.2.2
+wheel==0.41.2
