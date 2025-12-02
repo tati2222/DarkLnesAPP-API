@@ -672,6 +672,76 @@ async def model_status():
         }
     }
 
+@app.post("/analyze-image")
+async def analyze_image(request: dict):
+    """
+    Analiza una imagen estática (no video)
+    """
+    try:
+        logger.info("🖼️ Iniciando análisis de imagen estática...")
+        
+        if not all(key in request for key in ['image_data', 'participant_data', 'sd3_data']):
+            raise HTTPException(status_code=400, detail="Datos incompletos. Se necesitan: image_data, participant_data, sd3_data")
+        
+        # Decodificar imagen base64
+        image_data = request['image_data']
+        
+        # Manejar si viene con prefijo data:image/jpeg;base64,
+        if ',' in image_data:
+            image_data = image_data.split(',')[1]
+        
+        image_bytes = base64.b64decode(image_data)
+        
+        # Convertir bytes a numpy array para OpenCV
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        if frame is None:
+            logger.error("❌ No se pudo decodificar la imagen")
+            raise HTTPException(status_code=400, detail="Formato de imagen no válido")
+        
+        # Convertir BGR (OpenCV) a RGB
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        
+        logger.info(f"📸 Imagen decodificada: {frame.shape[1]}x{frame.shape[0]}")
+        
+        # Analizar el frame (usar la misma lógica que para videos)
+        analisis_emociones = await analyze_frame_emociones(frame_rgb)
+        analisis_facs = await analyze_frame_facs(frame_rgb)
+        
+        # Crear resultado para un solo frame
+        resultado_frame = {
+            **analisis_emociones,
+            "facs_avanzado": analisis_facs,
+            "frame_numero": 1,
+            "timestamp": 0
+        }
+        
+        # Procesar como si fuera un video de 1 frame
+        resultados_frames = [resultado_frame]
+        resultado_final = process_aggregated_results(resultados_frames, request['sd3_data'])
+        
+        # Agregar metadata
+        resultado_final["participante"] = request['participant_data'].get('nombre', 'Anónimo')
+        resultado_final["historia_utilizada"] = determinar_historia(request['sd3_data'])
+        resultado_final["timestamp_analisis"] = asyncio.get_event_loop().time()
+        
+        # Para imagen estática, ajustar algunos campos
+        resultado_final["total_frames"] = 1
+        resultado_final["duracion_video"] = 0
+        resultado_final["tipo_captura"] = "imagen"
+        
+        logger.info(f"✅ Análisis de imagen completado. Emoción: {resultado_final.get('emocion_predominante', 'No detectada')}")
+        
+        return resultado_final
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error en análisis de imagen: {str(e)}")
+        logger.error(f"📋 Traceback completo:", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error interno procesando imagen: {str(e)}")
+
 @app.post("/analyze-video")
 async def analyze_video(request: dict):
     try:
@@ -748,7 +818,7 @@ def determinar_historia(sd3_data: Dict) -> str:
     return rasgo_predominante
 
 # -----------------------------------------------------
-# NUEVOS ENDPOINTS PARA ANÁLISIS ESTADÍSTICO
+# NUEVOS ENDPOINTS PARA ANÁLISIS ESTADÍSTICO AVANZADO
 # -----------------------------------------------------
 
 @app.post("/analyze-correlations")
