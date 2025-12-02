@@ -14,17 +14,45 @@ import cv2
 import tempfile
 from typing import Dict, List, Any
 import json
-from scipy.stats import pearsonr
 import asyncio
 import logging
+from datetime import datetime
+import uuid
+
+# =====================================================
+# CONFIGURACIÓN SUPABASE
+# =====================================================
+try:
+    from supabase import create_client, Client
+    
+    # Configurar Supabase desde variables de entorno
+    SUPABASE_URL = os.environ.get("https://cdhndtzuwtmvhiulvzbp.supabase.co
+", "")
+    SUPABASE_KEY = os.environ.get("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNkaG5kdHp1d3RtdmhpdWx2emJwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQzNTE1OTcsImV4cCI6MjA3OTkyNzU5N30.KeyAfqJuCjgSpmd0kRdjDppkJwBRlF9oGyN0ozJMt6M
+", "")
+    
+    if SUPABASE_URL and SUPABASE_KEY:
+        supabase_client: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        supabase_available = True
+        logger.info("✅ Supabase configurado correctamente")
+    else:
+        supabase_available = False
+        logger.warning("⚠️ Supabase no configurado. Variables de entorno faltantes.")
+        
+except ImportError:
+    logger.warning("⚠️ Biblioteca supabase no instalada. Ejecuta: pip install supabase")
+    supabase_available = False
+except Exception as e:
+    logger.error(f"❌ Error configurando Supabase: {e}")
+    supabase_available = False
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# -----------------------------------------------------
-# MODELO DE EMOCIONES (PRIORIDAD)
-# -----------------------------------------------------
+# =====================================================
+# MODELO DE EMOCIONES
+# =====================================================
 class MicroExpNet(nn.Module):
     def __init__(self):
         super().__init__()
@@ -35,20 +63,17 @@ class MicroExpNet(nn.Module):
     def forward(self, x):
         return self.model(x)
 
-# Cargar modelo de emociones (PRIMARIO)
+# Cargar modelo de emociones
 device = "cuda" if torch.cuda.is_available() else "cpu"
 logger.info(f"🚀 Usando dispositivo: {device}")
 
 model_emociones = MicroExpNet()
 modelo_emociones_cargado = False
-modelo_facs_cargado = False
 
 try:
-    # Intentar cargar el modelo de emociones
     state = torch.load("microexp_retrained_FER2013.pth", map_location=device)
     first_key = list(state.keys())[0]
 
-    # Ajustar claves
     if first_key.startswith("model.model."):
         new_state = {k.replace("model.", "", 1): v for k, v in state.items()}
         model_emociones.load_state_dict(new_state, strict=True)
@@ -67,15 +92,220 @@ except Exception as e:
     logger.error(f"❌ Error cargando modelo de emociones: {e}")
     modelo_emociones_cargado = False
 
-# -----------------------------------------------------
-# CONFIGURACIÓN FACS (USANDO SISTEMA SIMULADO)
-# -----------------------------------------------------
+# =====================================================
+# CONFIGURACIÓN FACS (SIMULADO)
+# =====================================================
 modelo_facs_cargado = False
-logger.info("✅ Usando sistema FACS simulado (pyfeat no compatible con Python 3.13)")
+logger.info("✅ Usando sistema FACS simulado")
 
-# -----------------------------------------------------
-# PREPROCESAMIENTO
-# -----------------------------------------------------
+# =====================================================
+# FUNCIONES SUPABASE - ADAPTADAS A darklens_records
+# =====================================================
+async def upload_image_to_supabase(image_base64: str, analysis_id: str) -> str:
+    """Sube imagen a Supabase Storage y retorna URL pública"""
+    try:
+        if not supabase_available:
+            return None
+        
+        # Remover prefijo si existe
+        if ',' in image_base64:
+            image_base64 = image_base64.split(',')[1]
+        
+        # Decodificar base64
+        image_bytes = base64.b64decode(image_base64)
+        
+        # Generar nombre de archivo único
+        filename = f"{analysis_id}.jpg"
+        
+        # Subir a Supabase Storage
+        try:
+            # Intentar subir
+            supabase_client.storage.from_("analisis-images").upload(
+                filename,
+                image_bytes,
+                {"content-type": "image/jpeg"}
+            )
+            
+            # Obtener URL pública
+            image_url = supabase_client.storage.from_("analisis-images").get_public_url(filename)
+            logger.info(f"✅ Imagen subida a Supabase Storage: {image_url}")
+            return image_url
+            
+        except Exception as storage_error:
+            # Si el bucket no existe, crearlo primero
+            logger.warning(f"Bucket no encontrado, intentando crear: {storage_error}")
+            try:
+                # Nota: En Supabase, el bucket debe crearse desde el dashboard
+                # Por ahora, guardamos solo la referencia
+                return f"storage/analisis-images/{filename}"
+            except Exception as e:
+                logger.error(f"❌ Error con storage: {e}")
+                return None
+                
+    except Exception as e:
+        logger.error(f"❌ Error subiendo imagen a Supabase: {e}")
+        return None
+
+async def save_to_darklens_records(
+    participant_data: Dict,
+    sd3_data: Dict,
+    analysis_results: Dict,
+    image_base64: str = None
+) -> Dict:
+    """
+    Guarda los resultados en la tabla darklens_records de Supabase
+    
+    Returns:
+        Dict con status y analysis_id
+    """
+    try:
+        # Generar ID único para el análisis
+        analysis_id = str(uuid.uuid4())
+        
+        # Subir imagen a Supabase Storage si está disponible
+        image_url = None
+        if image_base64 and supabase_available:
+            image_url = await upload_image_to_supabase(image_base64, analysis_id)
+        
+        # Preparar datos según la estructura de darklens_records
+        record_data = {
+            "id": analysis_id,
+            "nombre": participant_data.get('nombre', 'Anónimo'),
+            "edad": participant_data.get('edad', None),
+            "genero": participant_data.get('genero', None),
+            "pais": participant_data.get('pais', None),
+            "mach": float(sd3_data.get('mach', 0.0)),
+            "narc": float(sd3_data.get('narc', 0.0)),
+            "psych": float(sd3_data.get('psych', 0.0)),
+            "tiempo_total_seg": float(analysis_results.get('duracion_analisis', 0.0)),
+            "emocion_princ": analysis_results.get('emocion_principal', 'No detectada'),
+            "image_url": image_url,
+            "created_at": datetime.utcnow().isoformat(),
+            "total_frames": analysis_results.get('total_frames', 1),
+            "duracion_video": float(analysis_results.get('duracion_analisis', 0.0)),
+            "emociones_detectadas": json.dumps(analysis_results.get('emociones_detectadas', [])),
+            "correlaciones": json.dumps(analysis_results.get('correlaciones', {})),
+            "historia_utilizada": analysis_results.get('historia_utilizada', 'No determinada'),
+            "aus_frecuentes": json.dumps(analysis_results.get('aus_frecuentes', [])),
+            "facs_promedio": json.dumps(analysis_results.get('facs_promedio', {}))
+        }
+        
+        # Guardar en Supabase si está disponible
+        if supabase_available:
+            try:
+                response = supabase_client.table("darklens_records").insert(record_data).execute()
+                
+                # Verificar respuesta
+                if hasattr(response, 'data') and response.data:
+                    logger.info(f"✅ Registro guardado en darklens_records con ID: {analysis_id}")
+                    return {
+                        "status": "success",
+                        "analysis_id": analysis_id,
+                        "image_url": image_url,
+                        "message": "Análisis guardado correctamente"
+                    }
+                else:
+                    logger.error("❌ Error: Respuesta vacía de Supabase")
+                    raise Exception("Respuesta vacía de Supabase")
+                    
+            except Exception as supabase_error:
+                logger.error(f"❌ Error insertando en Supabase: {supabase_error}")
+                # Fallback a almacenamiento local
+                return await save_to_local_fallback(record_data, image_base64, analysis_id)
+        else:
+            # Si Supabase no está disponible, guardar localmente
+            logger.warning("⚠️ Supabase no disponible, guardando localmente")
+            return await save_to_local_fallback(record_data, image_base64, analysis_id)
+            
+    except Exception as e:
+        logger.error(f"❌ Error guardando en darklens_records: {e}")
+        return {
+            "status": "error",
+            "analysis_id": None,
+            "message": f"Error guardando análisis: {str(e)}"
+        }
+
+async def save_to_local_fallback(record_data: Dict, image_base64: str, analysis_id: str) -> Dict:
+    """Guarda los resultados localmente como fallback"""
+    try:
+        # Crear directorio si no existe
+        os.makedirs("local_storage", exist_ok=True)
+        
+        # Guardar imagen si existe
+        image_path = None
+        if image_base64:
+            try:
+                if ',' in image_base64:
+                    image_base64 = image_base64.split(',')[1]
+                
+                image_bytes = base64.b64decode(image_base64)
+                image_path = f"local_storage/{analysis_id}.jpg"
+                
+                with open(image_path, "wb") as f:
+                    f.write(image_bytes)
+                    
+                logger.info(f"✅ Imagen guardada localmente: {image_path}")
+            except Exception as e:
+                logger.error(f"❌ Error guardando imagen localmente: {e}")
+        
+        # Guardar datos en JSON
+        record_data["image_local_path"] = image_path
+        results_path = f"local_storage/{analysis_id}.json"
+        
+        with open(results_path, "w", encoding="utf-8") as f:
+            json.dump(record_data, f, ensure_ascii=False, indent=2)
+        
+        logger.info(f"✅ Resultados guardados localmente: {results_path}")
+        
+        return {
+            "status": "success_local",
+            "analysis_id": analysis_id,
+            "image_url": image_path,
+            "message": "Análisis guardado localmente (Supabase no disponible)"
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error guardando localmente: {e}")
+        return {
+            "status": "error",
+            "analysis_id": None,
+            "message": f"Error guardando localmente: {str(e)}"
+        }
+
+async def get_user_analytics(user_email: str = None, user_name: str = None) -> List[Dict]:
+    """Obtiene análisis previos de un usuario desde darklens_records"""
+    try:
+        if not supabase_available:
+            return []
+        
+        query = supabase_client.table("darklens_records").select("*")
+        
+        if user_email:
+            # Si tu tabla tiene email, ajusta esto
+            query = query.eq("nombre", user_name)  # Ajusta según tus campos
+        elif user_name:
+            query = query.eq("nombre", user_name)
+        else:
+            return []
+        
+        # Ordenar por fecha descendente
+        query = query.order("created_at", desc=True).limit(10)
+        response = query.execute()
+        
+        if hasattr(response, 'data'):
+            return response.data
+        elif isinstance(response, dict) and 'data' in response:
+            return response['data']
+        else:
+            return []
+            
+    except Exception as e:
+        logger.error(f"❌ Error obteniendo análisis del usuario: {e}")
+        return []
+
+# =====================================================
+# FUNCIONES DE ANÁLISIS
+# =====================================================
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
@@ -84,31 +314,23 @@ transform = transforms.Compose([
 
 labels_emociones = ["Alegría", "Tristeza", "Enojo", "Sorpresa", "Miedo", "Disgusto", "Neutral"]
 
-# -----------------------------------------------------
-# FUNCIONES PARA ANÁLISIS DE VIDEO Y FACS
-# -----------------------------------------------------
-def extract_frames(video_path: str, frames_per_second: int = 1) -> List[np.ndarray]:
-    """Extrae frames del video (1 frame por segundo por defecto)"""
-    cap = cv2.VideoCapture(video_path)
-    frames = []
-    
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30
-    frame_interval = max(1, int(fps / frames_per_second))
-    
-    frame_count = 0
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-            
-        if frame_count % frame_interval == 0:
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frames.append(frame_rgb)
-            
-        frame_count += 1
+def decode_image_base64(image_data: str) -> np.ndarray:
+    """Decodifica una imagen en base64 a array numpy"""
+    try:
+        if ',' in image_data:
+            image_data = image_data.split(',')[1]
         
-    cap.release()
-    return frames
+        image_bytes = base64.b64decode(image_data)
+        image = Image.open(BytesIO(image_bytes))
+        
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+        
+        return np.array(image)
+        
+    except Exception as e:
+        logger.error(f"Error decodificando imagen base64: {e}")
+        raise HTTPException(status_code=400, detail=f"Error procesando imagen: {str(e)}")
 
 async def analyze_frame_emociones(frame: np.ndarray) -> Dict[str, Any]:
     """Analiza un frame usando el modelo de emociones"""
@@ -138,57 +360,6 @@ async def analyze_frame_emociones(frame: np.ndarray) -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"Error analizando frame: {e}")
         return generate_fallback_analysis()
-
-async def analyze_frame_facs(frame: np.ndarray) -> Dict[str, Any]:
-    """Analiza un frame usando FACS simulado"""
-    return {
-        "facs_disponible": False, 
-        "aus": [], 
-        "landmarks": [],
-        "modelo_utilizado": "Simulado"
-    }
-
-def get_au_name(au_code: str) -> str:
-    """Obtiene el nombre descriptivo de una Action Unit"""
-    au_names = {
-        "AU1": "Ceja interna elevada",
-        "AU2": "Ceja externa elevada", 
-        "AU4": "Ceja fruncida",
-        "AU5": "Párpado superior elevado",
-        "AU6": "Mejilla elevada",
-        "AU7": "Párpado tensionado",
-        "AU9": "Nariz arrugada",
-        "AU10": "Elevador labio superior",
-        "AU12": "Estiramiento de labios",
-        "AU15": "Comisura labial hacia abajo",
-        "AU17": "Mentón elevado",
-        "AU20": "Estiramiento horizontal de labios",
-        "AU23": "Labios tensionados",
-        "AU25": "Labios separados",
-        "AU26": "Mandíbula caída"
-    }
-    return au_names.get(au_code, f"Unidad {au_code}")
-
-def get_au_description(au_code: str) -> str:
-    """Obtiene la descripción de una Action Unit"""
-    au_descriptions = {
-        "AU1": "Expresión de preocupación o tristeza",
-        "AU2": "Expresión de sorpresa o miedo",
-        "AU4": "Expresión de enojo o concentración",
-        "AU5": "Expresión de miedo o sorpresa",
-        "AU6": "Expresión de alegría genuina",
-        "AU7": "Expresión de tensión ocular",
-        "AU9": "Expresión de disgusto o rechazo",
-        "AU10": "Expresión de disgusto superior",
-        "AU12": "Expresión de sonrisa",
-        "AU15": "Expresión de tristeza o desánimo",
-        "AU17": "Expresión de determinación o tensión",
-        "AU20": "Expresión de miedo o tensión labial",
-        "AU23": "Expresión de enojo o frustración",
-        "AU25": "Expresión de sorpresa o habla",
-        "AU26": "Expresión de sorpresa o incredulidad"
-    }
-    return au_descriptions.get(au_code, "Unidad de acción facial")
 
 def generate_facs_data(emocion_principal: str, confianza: float) -> List[Dict]:
     """Genera datos FACS basados en la emoción detectada (simulado)"""
@@ -265,45 +436,8 @@ def generate_fallback_analysis() -> Dict[str, Any]:
         "modelo_utilizado": "Fallback"
     }
 
-def process_aggregated_results(resultados_frames: List[Dict], sd3_data: Dict) -> Dict[str, Any]:
-    """Procesa y agrega los resultados de todos los frames"""
-    if not resultados_frames:
-        return generate_empty_response()
-    
-    # Estadísticas de emociones
-    emociones_todas = [r["emocion_principal"] for r in resultados_frames]
-    emocion_predominante = max(set(emociones_todas), key=emociones_todas.count)
-    
-    # Calcular correlaciones con SD3
-    correlaciones = calculate_correlations(resultados_frames, sd3_data)
-    
-    # Estadísticas FACS
-    aus_frecuentes = calculate_frequent_aus(resultados_frames)
-    facs_promedio = calculate_average_facs(resultados_frames)
-    
-    # Métricas adicionales
-    intensidad_promedio = np.mean([r.get("confianza", 0.5) for r in resultados_frames])
-    variabilidad_emocional = calculate_emotional_variability(resultados_frames)
-    
-    return {
-        "emocion_predominante": emocion_predominante,
-        "total_frames": len(resultados_frames),
-        "duracion_video": len(resultados_frames),  # 1 frame por segundo
-        "emociones_detectadas": list(set(emociones_todas)),
-        "correlaciones": correlaciones,
-        "frames_analizados": len(resultados_frames),
-        "intensidad_promedio": float(intensidad_promedio),
-        "variabilidad_emocional": float(variabilidad_emocional),
-        "aus_frecuentes": aus_frecuentes,
-        "facs_promedio": facs_promedio,
-        "modelos_utilizados": {
-            "emociones": resultados_frames[0].get("modelo_utilizado", "Desconocido"),
-            "facs": "Py-Feat" if modelo_facs_cargado else "Simulado"
-        }
-    }
-
-def calculate_correlations(resultados_frames: List[Dict], sd3_data: Dict) -> Dict[str, float]:
-    """Calcula correlaciones entre emociones y rasgos SD3"""
+def calculate_correlations_single(resultado_frame: Dict, sd3_data: Dict) -> Dict[str, float]:
+    """Calcula correlaciones entre una emoción y rasgos SD3"""
     emocion_to_trait = {
         "Alegría": "narcisismo",
         "Enojo": "maquiavelismo", 
@@ -314,102 +448,38 @@ def calculate_correlations(resultados_frames: List[Dict], sd3_data: Dict) -> Dic
         "Disgusto": "maquiavelismo"
     }
     
-    emocion_counts = {}
-    for resultado in resultados_frames:
-        emocion = resultado["emocion_principal"]
-        emocion_counts[emocion] = emocion_counts.get(emocion, 0) + 1
+    emocion = resultado_frame["emocion_principal"]
+    confianza = resultado_frame["confianza"]
     
     correlaciones = {}
     for rasgo in ["maquiavelismo", "narcisismo", "psicopatia"]:
         score_sd3 = sd3_data.get(rasgo[:4], 0)  # mach, narc, psych
         
-        emociones_relacionadas = [emocion for emocion, trait in emocion_to_trait.items() 
-                                if trait == rasgo]
+        rasgo_relacionado = emocion_to_trait.get(emocion, "narcisismo")
         
-        total_frames_relacionados = sum(emocion_counts.get(emocion, 0) 
-                                      for emocion in emociones_relacionadas)
-        proporcion = total_frames_relacionados / len(resultados_frames) if resultados_frames else 0
+        if rasgo == rasgo_relacionado:
+            correlacion = min(confianza * score_sd3 * 2, 1.0)
+        else:
+            correlacion = min((1 - confianza) * score_sd3 * 0.5, 0.5)
         
-        correlacion = min(proporcion * score_sd3 * 2, 1.0)
         correlaciones[rasgo] = float(correlacion)
     
     return correlaciones
 
-def calculate_frequent_aus(resultados_frames: List[Dict]) -> List[str]:
-    """Calcula las Action Units más frecuentes"""
-    aus_counts = {}
-    for resultado in resultados_frames:
-        for au in resultado.get("aus_detectadas", []):
-            aus_counts[au] = aus_counts.get(au, 0) + 1
-    
-    aus_frecuentes = sorted(aus_counts.items(), key=lambda x: x[1], reverse=True)[:5]
-    return [au for au, count in aus_frecuentes]
-
-def calculate_average_facs(resultados_frames: List[Dict]) -> Dict[str, float]:
-    """Calcula intensidades promedio de FACS"""
-    facs_intensities = {}
-    facs_count = {}
-    
-    for resultado in resultados_frames:
-        for facs in resultado.get("facs", []):
-            au = facs["unidad"]
-            intensidad = facs["intensidad"]
-            
-            if au not in facs_intensities:
-                facs_intensities[au] = 0
-                facs_count[au] = 0
-            
-            facs_intensities[au] += intensidad
-            facs_count[au] += 1
-    
-    facs_promedio = {}
-    for au in facs_intensities:
-        if facs_count[au] > 0:
-            facs_promedio[au] = float(facs_intensities[au] / facs_count[au])
-    
-    return facs_promedio
-
-def calculate_emotional_variability(resultados_frames: List[Dict]) -> float:
-    """Calcula la variabilidad emocional"""
-    emocion_counts = {}
-    for resultado in resultados_frames:
-        emocion = resultado["emocion_principal"]
-        emocion_counts[emocion] = emocion_counts.get(emocion, 0) + 1
-    
-    total_frames = len(resultados_frames)
-    if total_frames == 0:
-        return 0.0
-    
-    entropia = 0.0
-    for count in emocion_counts.values():
-        probabilidad = count / total_frames
-        if probabilidad > 0:
-            entropia -= probabilidad * np.log2(probabilidad)
-    
-    max_entropia = np.log2(len(emocion_counts)) if emocion_counts else 1
-    variabilidad = entropia / max_entropia if max_entropia > 0 else 0
-    
-    return float(variabilidad)
-
-def generate_empty_response() -> Dict[str, Any]:
-    """Genera respuesta vacía para casos de error"""
-    return {
-        "emocion_predominante": "No detectada",
-        "total_frames": 0,
-        "duracion_video": 0,
-        "emociones_detectadas": [],
-        "correlaciones": {"maquiavelismo": 0, "narcisismo": 0, "psicopatia": 0},
-        "frames_analizados": 0,
-        "intensidad_promedio": 0,
-        "variabilidad_emocional": 0,
-        "aus_frecuentes": [],
-        "facs_promedio": {},
-        "modelos_utilizados": {"emociones": "No disponible", "facs": "No disponible"}
+def determinar_historia(sd3_data: Dict) -> str:
+    """Determina la historia utilizada basada en SD3"""
+    rasgos = {
+        "maquiavelismo": sd3_data.get('mach', 0),
+        "narcisismo": sd3_data.get('narc', 0),
+        "psicopatia": sd3_data.get('psych', 0)
     }
+    
+    rasgo_predominante = max(rasgos, key=rasgos.get)
+    return rasgo_predominante
 
-# -----------------------------------------------------
-# FASTAPI + CORS
-# -----------------------------------------------------
+# =====================================================
+# FASTAPI ENDPOINTS
+# =====================================================
 app = FastAPI(title="DarkLnes Microexpressions API")
 
 app.add_middleware(
@@ -426,8 +496,12 @@ async def root():
         "message": "DarkLnes Microexpressions API", 
         "status": "running",
         "modelo_emociones": modelo_emociones_cargado,
-        "modelo_facs": modelo_facs_cargado,
-        "prioridad": "Modelo de emociones"
+        "supabase_available": supabase_available,
+        "endpoints": {
+            "/analyze-image": "Analiza una imagen y guarda en Supabase",
+            "/health": "Estado del sistema",
+            "/config": "Configuración actual"
+        }
     }
 
 @app.get("/health")
@@ -435,100 +509,163 @@ async def health_check():
     return {
         "status": "healthy", 
         "modelo_emociones": modelo_emociones_cargado,
-        "modelo_facs": modelo_facs_cargado
+        "supabase_available": supabase_available,
+        "device": device
     }
 
-@app.get("/model-status")
-async def model_status():
+@app.get("/config")
+async def get_config():
     return {
-        "emociones": {
-            "cargado": modelo_emociones_cargado,
-            "modelo": "EfficientNet-B0",
-            "prioridad": "ALTA"
-        },
-        "facs": {
-            "cargado": modelo_facs_cargado, 
-            "modelo": "Py-Feat" if modelo_facs_cargado else "Simulado",
-            "prioridad": "MEDIA"
-        }
+        "supabase_url_set": bool(SUPABASE_URL),
+        "supabase_key_set": bool(SUPABASE_KEY),
+        "model_loaded": modelo_emociones_cargado,
+        "storage_bucket": "analisis-images"
     }
 
-@app.post("/analyze-video")
-async def analyze_video(request: dict):
+@app.post("/analyze-image")
+async def analyze_image(request: dict):
     try:
-        logger.info("🎬 Iniciando análisis de video...")
+        logger.info("🖼️ Iniciando análisis de imagen...")
         
-        if not all(key in request for key in ['video_data', 'participant_data', 'sd3_data']):
-            raise HTTPException(status_code=400, detail="Datos incompletos")
+        # Verificar datos requeridos
+        required_keys = ['image_data', 'participant_data', 'sd3_data']
+        if not all(key in request for key in required_keys):
+            raise HTTPException(status_code=400, detail=f"Datos incompletos. Requeridos: {required_keys}")
         
-        # Decodificar video base64
-        video_bytes = base64.b64decode(request['video_data'].split(',')[1])
+        # Decodificar imagen base64
+        logger.info("📥 Decodificando imagen...")
+        frame = decode_image_base64(request['image_data'])
         
-        # Guardar video temporalmente
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.webm') as temp_file:
-            temp_file.write(video_bytes)
-            temp_video_path = temp_file.name
+        # Analizar la imagen
+        logger.info("🔍 Analizando imagen...")
+        analisis_emociones = await analyze_frame_emociones(frame)
+        
+        # Procesar resultados para una sola imagen
+        emocion_principal = analisis_emociones["emocion_principal"]
+        confianza = analisis_emociones["confianza"]
+        
+        # Calcular correlaciones con SD3
+        correlaciones = calculate_correlations_single(analisis_emociones, request['sd3_data'])
+        
+        # Obtener AUs detectadas
+        aus_frecuentes = analisis_emociones.get("aus_detectadas", [])
+        
+        # Calcular FACS promedio
+        facs_promedio = {}
+        for facs in analisis_emociones.get("facs", []):
+            facs_promedio[facs["unidad"]] = facs["intensidad"]
+        
+        # Preparar resultados finales
+        analysis_results = {
+            "emocion_principal": emocion_principal,
+            "confianza": confianza,
+            "total_frames": 1,
+            "duracion_analisis": 0.0,
+            "emociones_detectadas": [emocion_principal],
+            "correlaciones": correlaciones,
+            "frames_analizados": 1,
+            "intensidad_promedio": float(confianza),
+            "variabilidad_emocional": 0.0,
+            "aus_frecuentes": aus_frecuentes,
+            "facs_promedio": facs_promedio,
+            "historia_utilizada": determinar_historia(request['sd3_data']),
+            "modelos_utilizados": {
+                "emociones": analisis_emociones.get("modelo_utilizado", "Desconocido"),
+                "facs": "Simulado"
+            },
+            "detalles_frame": analisis_emociones
+        }
+        
+        # Guardar en Supabase
+        logger.info("💾 Guardando resultados en Supabase...")
+        save_result = await save_to_darklens_records(
+            participant_data=request['participant_data'],
+            sd3_data=request['sd3_data'],
+            analysis_results=analysis_results,
+            image_base64=request['image_data']
+        )
+        
+        # Agregar metadata a la respuesta
+        response_data = {
+            **analysis_results,
+            "participante": request['participant_data'].get('nombre', 'Anónimo'),
+            "timestamp_analisis": datetime.utcnow().isoformat(),
+            "tipo_analisis": "imagen",
+            "storage_info": save_result
+        }
+        
+        logger.info("✅ Análisis de imagen completado y guardado")
+        return response_data
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error en análisis de imagen: {e}")
+        raise HTTPException(status_code=500, detail=f"Error procesando imagen: {str(e)}")
 
-        # Extraer frames del video (1 frame por segundo)
-        frames = extract_frames(temp_video_path)
-        logger.info(f"📊 Frames extraídos: {len(frames)}")
+# Endpoint para análisis directo desde archivo
+@app.post("/analyze-image-file")
+async def analyze_image_file(
+    file: UploadFile = File(...),
+    nombre: str = "Anónimo",
+    edad: int = None,
+    genero: str = None,
+    pais: str = None,
+    mach: float = 0.0,
+    narc: float = 0.0,
+    psych: float = 0.0
+):
+    try:
+        logger.info(f"🖼️ Analizando imagen de {nombre}...")
         
-        # Analizar cada frame
-        resultados_frames = []
-        for i, frame in enumerate(frames):
-            try:
-                logger.info(f"🔍 Analizando frame {i+1}/{len(frames)}...")
-                
-                # Análisis de emociones (PRIMARIO)
-                analisis_emociones = await analyze_frame_emociones(frame)
-                
-                # Análisis FACS (SECUNDARIO - solo si está disponible)
-                analisis_facs = await analyze_frame_facs(frame)
-                
-                # Combinar resultados
-                resultado_frame = {
-                    **analisis_emociones,
-                    "facs_avanzado": analisis_facs,
-                    "frame_numero": i + 1,
-                    "timestamp": i  # segundos
-                }
-                
-                resultados_frames.append(resultado_frame)
-                
-            except Exception as e:
-                logger.error(f"⚠️ Error analizando frame {i+1}: {e}")
-                continue
-
-        # Procesar resultados agregados
-        resultado_final = process_aggregated_results(resultados_frames, request['sd3_data'])
+        # Leer archivo y convertir a base64
+        contents = await file.read()
+        image_base64 = base64.b64encode(contents).decode('utf-8')
+        image_data = f"data:{file.content_type};base64,{image_base64}"
         
-        # Agregar metadata
-        resultado_final["participante"] = request['participant_data'].get('nombre', 'Anónimo')
-        resultado_final["historia_utilizada"] = determinar_historia(request['sd3_data'])
-        resultado_final["timestamp_analisis"] = asyncio.get_event_loop().time()
+        # Preparar datos
+        participant_data = {
+            "nombre": nombre,
+            "edad": edad,
+            "genero": genero,
+            "pais": pais
+        }
         
-        # Limpiar archivo temporal
-        os.unlink(temp_video_path)
+        sd3_data = {
+            "mach": mach,
+            "narc": narc,
+            "psych": psych
+        }
         
-        logger.info("✅ Análisis de video completado")
-        return resultado_final
+        # Crear request
+        request = {
+            "image_data": image_data,
+            "participant_data": participant_data,
+            "sd3_data": sd3_data
+        }
+        
+        # Llamar al endpoint principal
+        return await analyze_image(request)
         
     except Exception as e:
-        logger.error(f"❌ Error en análisis de video: {e}")
-        raise HTTPException(status_code=500, detail=f"Error procesando video: {str(e)}")
+        logger.error(f"❌ Error en análisis de archivo: {e}")
+        raise HTTPException(status_code=500, detail=f"Error procesando archivo: {str(e)}")
 
-def determinar_historia(sd3_data: Dict) -> str:
-    """Determina la historia utilizada basada en SD3"""
-    rasgos = {
-        "maquiavelismo": sd3_data.get('mach', 0),
-        "narcisismo": sd3_data.get('narc', 0),
-        "psicopatia": sd3_data.get('psych', 0)
-    }
-    
-    rasgo_predominante = max(rasgos, key=rasgos.get)
-    return rasgo_predominante
+# Endpoint para obtener análisis previos
+@app.get("/user-analytics/{user_name}")
+async def get_user_analytics_endpoint(user_name: str):
+    try:
+        analytics = await get_user_analytics(user_name=user_name)
+        return {
+            "user": user_name,
+            "total_analyses": len(analytics),
+            "analytics": analytics[:10]  # Limitar a 10 resultados
+        }
+    except Exception as e:
+        logger.error(f"❌ Error obteniendo analytics: {e}")
+        raise HTTPException(status_code=500, detail=f"Error obteniendo analytics: {str(e)}")
 
-# Para Render
+# Para ejecutar en Render
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     uvicorn.run(app, host="0.0.0.0", port=port)
