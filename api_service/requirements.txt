@@ -1,14 +1,22 @@
-# api_service/requirements.txt
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
-torch==2.1.0
-torchvision==0.16.0
+python-multipart==0.0.6
+
+# PyTorch con CUDA disabled (más ligero para Render)
+torch==2.1.0+cpu --index-url https://download.pytorch.org/whl/cpu
+torchvision==0.16.0+cpu --index-url https://download.pytorch.org/whl/cpu
+torchaudio==2.1.0+cpu --index-url https://download.pytorch.org/whl/cpu
+
+# Computer Vision
+opencv-python-headless==4.8.1.78
 Pillow==10.1.0
-opencv-python==4.8.1.78
+
+# Data Science
 numpy==1.24.3
-scipy==1.11.4
 pandas==2.1.3
+scikit-learn==1.3.2
+scipy==1.11.4
+
+# Visualization
 matplotlib==3.8.2
 seaborn==0.13.0
-python-multipart==0.0.6
-scikit-learn
