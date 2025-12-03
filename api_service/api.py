@@ -1,15 +1,13 @@
-# api.py — versión alineada EXACTAMENTE con tu tabla darklens_records
+# api.py — versión final
 import os
 import io
 import json
-import traceback
 from datetime import datetime
 
 import torch
 from torchvision import transforms
 from PIL import Image
 
-import numpy as np
 import pandas as pd
 from scipy import stats
 
@@ -17,37 +15,32 @@ from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from supabase import create_client
-# ==========================
-# CONFIG
-# ==========================
 
+# ========================================
+# CONFIG
+# ========================================
 SUPABASE_URL = "https://cdhndtzuwtmvhiulvzbp.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNkaG5kdHp1d3RtdmhpdWx2emJwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQzNTE1OTcsImV4cCI6MjA3OTkyNzU5N30.KeyAfqJuCjgSpmd0kRdjDppkJwBRlF9oGyN0ozJMt6M"
 
-MODEL_PATH = "microexp_retrained_FER2013.pth"   # nombre exacto de tu modelo
+MODEL_PATH = "microexp_retrained_FER2013.pth"
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
 )
 
-
-# ==========================
+# ========================================
 # CARGA DEL MODELO
-# ==========================
+# ========================================
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 try:
     model = torch.load(MODEL_PATH, map_location=device)
     model.eval()
-except Exception as e:
-    print("Error cargando modelo:", e)
+except:
     model = None
 
 LABELS = {
@@ -69,10 +62,54 @@ def emotion_to_code(e):
     inv = {v: k for k, v in LABELS.items()}
     return inv.get(e, -1)
 
-# ==========================
-# ENDPOINT PRINCIPAL
-# ==========================
 
+# ========================================
+# FUNCIÓN PARA REDACTAR INFORME CLÍNICO
+# ========================================
+def generar_informe_clinico(emocion, mach, narc, psych, corr):
+    texto = []
+
+    texto.append(f"La emoción predominante detectada es **{emocion}**.")
+
+    # Rasgos
+    texto.append(
+        f"En los rasgos de la tríada oscura, el participante presentó: "
+        f"Maquiavelismo = {mach}, Narcisismo = {narc}, Psicopatía = {psych}."
+    )
+
+    # Correlaciones
+    interpretaciones = []
+    if corr.get("rho_mach") not in [None, "null"]:
+        interpretaciones.append("tendencias manipulativas (maquiavelismo)")
+    if corr.get("rho_narc") not in [None, "null"]:
+        interpretaciones.append("búsqueda de validación o grandiosidad (narcisismo)")
+    if corr.get("rho_psych") not in [None, "null"]:
+        interpretaciones.append("conducta impulsiva o baja empatía (psicopatía)")
+
+    if interpretaciones:
+        texto.append(
+            "Las correlaciones observadas sugieren una relación entre la expresión emocional "
+            f"y {', '.join(interpretaciones)}. Estos datos deben interpretarse con cautela, "
+            "ya que dependen del tamaño muestral y del contexto."
+        )
+    else:
+        texto.append(
+            "No se hallaron correlaciones significativas entre las emociones detectadas "
+            "y los rasgos de personalidad, posiblemente por bajo tamaño muestral."
+        )
+
+    texto.append(
+        "El análisis combina microexpresiones y rasgos de personalidad, ofreciendo una "
+        "visión integrada del perfil emocional y conductual, útil para investigación "
+        "pero no concluyente a nivel diagnóstico."
+    )
+
+    return " ".join(texto)
+
+
+# ========================================
+# ENDPOINT PRINCIPAL
+# ========================================
 @app.post("/analyze")
 async def analyze(
     file: UploadFile = File(...),
@@ -91,137 +128,113 @@ async def analyze(
     historia_utilizada: str = Form(""),
     tipo_captura: str = Form("imagen"),
 ):
-    """
-    Recibe:
-    - Imagen
-    - Datos SD3
-    - Datos demográficos
-    - Tiempo total
-    GUARDADO EN darklens_records
-    """
-
     if model is None:
         raise HTTPException(500, "Modelo no cargado")
 
-    try:
-        # =========================================
-        # 1) Procesar imagen
-        # =========================================
-        contents = await file.read()
-        img = Image.open(io.BytesIO(contents)).convert("RGB")
+    # ================================
+    # Procesar imagen
+    # ================================
+    contents = await file.read()
+    img = Image.open(io.BytesIO(contents)).convert("RGB")
+    tensor = transform(img).unsqueeze(0).to(device)
 
-        tensor = transform(img).unsqueeze(0).to(device)
+    with torch.no_grad():
+        out = model(tensor)
+        pred = torch.argmax(out, dim=1).cpu().numpy()[0]
+        emocion = LABELS.get(int(pred), "desconocido")
 
-        with torch.no_grad():
-            out = model(tensor)
-            pred = torch.argmax(out, dim=1).cpu().numpy()[0]
-            emocion = LABELS.get(int(pred), "desconocido")
+    # ================================
+    # Subir imagen a Supabase Storage
+    # ================================
+    timestamp = int(datetime.utcnow().timestamp() * 1000)
+    file_ext = os.path.splitext(file.filename)[1]
+    path = f"microexpresiones/{nombre}_{timestamp}{file_ext}"
 
-        # =========================================
-        # 2) Subir imagen a Supabase Storage
-        # =========================================
-        timestamp = int(datetime.utcnow().timestamp() * 1000)
-        file_ext = os.path.splitext(file.filename)[1]
-        path = f"microexpresiones/{nombre}_{timestamp}{file_ext}"
+    upload = supabase.storage.from_("images").upload(path, contents)
+    if upload.get("error"):
+        raise HTTPException(500, f"Error subiendo imagen: {upload['error']}")
 
-        upload = supabase.storage.from_("images").upload(path, contents)
+    image_url = supabase.storage.from_("images").get_public_url(path).get("publicURL")
 
-        if upload.get("error"):
-            raise HTTPException(500, f"Error subiendo imagen: {upload['error']}")
+    # ================================
+    # Correlaciones cohortales
+    # ================================
+    resp = supabase.table("darklens_records") \
+        .select("mach, narc, psych, emocion_principal") \
+        .execute()
 
-        image_url = supabase.storage.from_("images").get_public_url(path).get("publicURL")
+    df = pd.DataFrame(resp.data)
 
-        # =========================================
-        # 3) Calcular correlaciones cohortales
-        # =========================================
-        resp = supabase.table("darklens_records") \
-            .select("mach, narc, psych, emocion_principal") \
-            .execute()
+    corr_info = {
+        "rho_mach": None,
+        "rho_narc": None,
+        "rho_psych": None,
+        "p_mach": None,
+        "p_narc": None,
+        "p_psych": None,
+    }
 
-        df = pd.DataFrame(resp.data)
+    if len(df) >= 3:
+        df = df.dropna()
+        if "emocion_principal" in df:
+            df["emotion_code"] = df["emocion_principal"].apply(emotion_to_code)
+            if df["emotion_code"].nunique() > 1:
+                try:
+                    corr_info["rho_mach"], corr_info["p_mach"] = stats.spearmanr(df["mach"], df["emotion_code"])
+                except:
+                    pass
+                try:
+                    corr_info["rho_narc"], corr_info["p_narc"] = stats.spearmanr(df["narc"], df["emotion_code"])
+                except:
+                    pass
+                try:
+                    corr_info["rho_psych"], corr_info["p_psych"] = stats.spearmanr(df["psych"], df["emotion_code"])
+                except:
+                    pass
 
-        corr_info = {
-            "rho_mach": None,
-            "rho_narc": None,
-            "rho_psych": None,
-            "p_mach": None,
-            "p_narc": None,
-            "p_psych": None,
-            "interpretacion": "Aún no hay suficientes datos."
-        }
+    # ================================
+    # GENERAR INFORME CLÍNICO
+    # ================================
+    informe = generar_informe_clinico(emocion, mach, narc, psych, corr_info)
 
-        if len(df) >= 3:
-            df = df.dropna()
+    # ================================
+    # Guardar registro final
+    # ================================
+    row = {
+        "nombre": nombre,
+        "edad": edad,
+        "genero": genero,
+        "pais": pais,
 
-            if "emocion_principal" in df:
-                df["emotion_code"] = df["emocion_principal"].apply(emotion_to_code)
+        "mach": mach,
+        "narc": narc,
+        "psych": psych,
 
-                if df["emotion_code"].nunique() > 1:
+        "tiempo_total_seg": tiempo_total_seg,
 
-                    # MACH
-                    try:
-                        rho, p = stats.spearmanr(df["mach"], df["emotion_code"])
-                        corr_info["rho_mach"] = rho
-                        corr_info["p_mach"] = p
-                    except:
-                        pass
+        "emocion_principal": emocion,
+        "total_frames": 1,
+        "duracion_video": 0,
 
-                    # NARC
-                    try:
-                        rho, p = stats.spearmanr(df["narc"], df["emotion_code"])
-                        corr_info["rho_narc"] = rho
-                        corr_info["p_narc"] = p
-                    except:
-                        pass
+        "emociones_detectadas": [emocion],
+        "correlaciones": corr_info,
 
-                    # PSYCH
-                    try:
-                        rho, p = stats.spearmanr(df["psych"], df["emotion_code"])
-                        corr_info["rho_psych"] = rho
-                        corr_info["p_psych"] = p
-                    except:
-                        pass
+        "aus_frecuentes": None,
+        "facs_promedio": None,
 
-                    corr_info["interpretacion"] = "Correlaciones calculadas. Interpretar con cautela."
+        "historia_utilizada": historia_utilizada,
+        "tipo_captura": tipo_captura,
+        "imagen_analizada": True,
 
-        # =========================================
-        # 4) Guardar registro final en tabla
-        # =========================================
+        "analisis_completo": informe
+    }
 
-        row = {
-            "nombre": nombre,
-            "edad": edad,
-            "genero": genero,
-            "pais": pais,
+    insert = supabase.table("darklens_records").insert(row).execute()
 
-            "mach": mach,
-            "narc": narc,
-            "psych": psych,
-
-            "tiempo_total_seg": tiempo_total_seg,
-
-            "emocion_principal": emocion,
-            "total_frames": 1,  # si después agregás video, esto cambia
-            "duracion_video": 0,
-
-            "emociones_detectadas": [emocion],
-            "correlaciones": corr_info,
-
-            "aus_frecuentes": [],
-            "facs_promedio": {},
-
-            "historia_utilizada": historia_utilizada,
-            "tipo_captura": tipo_captura,
-            "imagen_analizada": True,
-
-            "analisis_completo": f"La emoción detectada es {emocion}.",
-        }
-
-        insert = supabase.table("darklens_records").insert(row).execute()
-
-        return {
-            "success": True,
-            "emocion_detectada": emocion,
-            "imagen_url": image_url,
-            "registro_guardado": insert.data,
-            "correlaciones":
+    return {
+        "success": True,
+        "emocion_detectada": emocion,
+        "imagen_url": image_url,
+        "registro_guardado": insert.data,
+        "informe": informe
+    }
