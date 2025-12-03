@@ -1,11 +1,10 @@
-# api.py — versión final
 import os
 import io
-import json
 from datetime import datetime
 
 import torch
-from torchvision import transforms
+import torch.nn as nn
+from torchvision import transforms, models
 from PIL import Image
 
 import pandas as pd
@@ -20,7 +19,7 @@ from supabase import create_client
 # CONFIG
 # ========================================
 SUPABASE_URL = "https://cdhndtzuwtmvhiulvzbp.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNkaG5kdHp1d3RtdmhpdWx2emJwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQzNTE1OTcsImV4cCI6MjA3OTkyNzU5N30.KeyAfqJuCjgSpmd0kRdjDppkJwBRlF9oGyN0ozJMt6M"
+SUPABASE_KEY = "YOUR_SUPABASE_KEY"  # Reemplaza aquí por la real
 
 MODEL_PATH = "best_microexp_model.pth"
 
@@ -33,30 +32,39 @@ app.add_middleware(
 )
 
 # ========================================
-# CARGA DEL MODELO
+# CARGA DEL MODELO EfficientNet-B0 con pesos guardados
 # ========================================
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-try:
-    model = torch.load(MODEL_PATH, map_location=device)
-    model.eval()
-except:
-    model = None
-
+num_classes = 7
 LABELS = {
-    0: "neutral",
-    1: "felicidad",
-    2: "tristeza",
-    3: "sorpresa",
-    4: "miedo",
-    5: "asco",
-    6: "enojo"
+    0: "anger",
+    1: "disgust",
+    2: "fear",
+    3: "happiness",
+    4: "neutral",
+    5: "sadness",
+    6: "surprise"
 }
 
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
-    transforms.ToTensor()
+    transforms.ToTensor(),
+    transforms.Normalize([0.485, 0.456, 0.406],
+                         [0.229, 0.224, 0.225])
 ])
+
+# Instanciar arquitectura y cargar pesos
+try:
+    model = models.efficientnet_b0(weights=None)
+    model.classifier[1] = nn.Linear(model.classifier[1].in_features, num_classes)
+    model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
+    model.to(device)
+    model.eval()
+except Exception as e:
+    print("Error cargando modelo:", e)
+    model = None
+
 
 def emotion_to_code(e):
     inv = {v: k for k, v in LABELS.items()}
@@ -131,21 +139,18 @@ async def analyze(
     if model is None:
         raise HTTPException(500, "Modelo no cargado")
 
-    # ================================
     # Procesar imagen
-    # ================================
     contents = await file.read()
     img = Image.open(io.BytesIO(contents)).convert("RGB")
     tensor = transform(img).unsqueeze(0).to(device)
 
     with torch.no_grad():
         out = model(tensor)
-        pred = torch.argmax(out, dim=1).cpu().numpy()[0]
-        emocion = LABELS.get(int(pred), "desconocido")
+        probs = torch.softmax(out, dim=1)[0].cpu().numpy()
+        pred_idx = int(probs.argmax())
+        emocion = LABELS.get(pred_idx, "desconocido")
 
-    # ================================
     # Subir imagen a Supabase Storage
-    # ================================
     timestamp = int(datetime.utcnow().timestamp() * 1000)
     file_ext = os.path.splitext(file.filename)[1]
     path = f"microexpresiones/{nombre}_{timestamp}{file_ext}"
@@ -156,9 +161,7 @@ async def analyze(
 
     image_url = supabase.storage.from_("images").get_public_url(path).get("publicURL")
 
-    # ================================
     # Correlaciones cohortales
-    # ================================
     resp = supabase.table("darklens_records") \
         .select("mach, narc, psych, emocion_principal") \
         .execute()
@@ -192,14 +195,10 @@ async def analyze(
                 except:
                     pass
 
-    # ================================
-    # GENERAR INFORME CLÍNICO
-    # ================================
+    # Generar informe clínico
     informe = generar_informe_clinico(emocion, mach, narc, psych, corr_info)
 
-    # ================================
     # Guardar registro final
-    # ================================
     row = {
         "nombre": nombre,
         "edad": edad,
