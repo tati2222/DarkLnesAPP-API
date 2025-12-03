@@ -159,7 +159,8 @@ async def analyze(
     if upload.get("error"):
         raise HTTPException(500, f"Error subiendo imagen: {upload['error']}")
 
-    image_url = supabase.storage.from_("images").get_public_url(path).get("publicURL")
+    public_url_response = supabase.storage.from_("images").get_public_url(path)
+image_url = public_url_response if isinstance(public_url_response, str) else public_url_response.get("publicUrl", "")
 
     # Correlaciones cohortales
     resp = supabase.table("darklens_records") \
@@ -223,6 +224,7 @@ async def analyze(
 
         "historia_utilizada": historia_utilizada,
         "tipo_captura": tipo_captura,
+        "imagen_url": image_url, 
         "imagen_analizada": True,
 
         "analisis_completo": informe
