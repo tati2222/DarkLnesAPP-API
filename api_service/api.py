@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 from torchvision import transforms, models
 from PIL import Image
+import numpy as np
 
 import pandas as pd
 from scipy import stats
@@ -14,10 +15,19 @@ from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from supabase import create_client
+from facs_mediapipe import FACSMediaPipe
+import logging
+
 
 # ========================================
 # CONFIG
 # ========================================
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Inicializar el analizador FACS (global)
+facs_analyzer = None
 SUPABASE_URL = "https://cdhndtzuwtmvhiulvzbp.supabase.co"
 SUPABASE_KEY = "YOUR_SUPABASE_KEY"  # Reemplaza aquí por la real
 
@@ -33,7 +43,22 @@ app.add_middleware(
 
 @app.get("/")
 def root():
-    return {"message": "API funcionando correctamente"}
+    return {
+        "message": "API funcionando correctamente",
+        "facs_disponible": facs_analyzer is not None, 
+        "message": "API funcionando correctamente"
+    }
+
+@app.on_event("startup")
+async def startup_event():
+    global facs_analyzer
+    try:
+        logger.info("Inicializando analizador FACS...")
+        facs_analyzer = FACSMediaPipe()
+        logger.info("✓ FACS listo")
+    except Exception as e:
+        logger.warning(f"⚠️ FACS no disponible: {e}")
+        facs_analyzer = None
 
 # ========================================
 # CARGA DEL MODELO EfficientNet-B0 con pesos guardados
@@ -78,7 +103,7 @@ def emotion_to_code(e):
 # ========================================
 # FUNCIÓN PARA REDACTAR INFORME CLÍNICO
 # ========================================
-def generar_informe_clinico(emocion, mach, narc, psych, corr):
+def generar_informe_clinico(emocion, mach, narc, psych, corr, facs_data=None):
     texto = []
 
     texto.append(f"La emoción predominante detectada es **{emocion}**.")
@@ -88,6 +113,43 @@ def generar_informe_clinico(emocion, mach, narc, psych, corr):
         f"En los rasgos de la tríada oscura, el participante presentó: "
         f"Maquiavelismo = {mach}, Narcisismo = {narc}, Psicopatía = {psych}."
     )
+
+    # Análisis FACS (NUEVO)
+    if facs_data and facs_data.get("action_units"):
+        aus_activos = [au["code"] for au in facs_data["action_units"]]
+        texto.append(
+            f"El análisis FACS identificó {len(aus_activos)} Action Units activos: "
+            f"{', '.join(aus_activos)}. "
+        )
+        
+        # Interpretación de autenticidad
+        if facs_data.get("interpretation"):
+            interp = facs_data["interpretation"]
+            auth_score = interp.get("authenticity_score", 0)
+            
+            if auth_score > 0.6:
+                texto.append(
+                    f"La expresión emocional muestra una autenticidad de {auth_score*100:.0f}%, "
+                    "indicando que la emoción detectada presenta marcadores fisiológicos consistentes."
+                )
+            elif auth_score > 0.3:
+                texto.append(
+                    f"La expresión emocional presenta una autenticidad moderada ({auth_score*100:.0f}%), "
+                    "lo que sugiere una posible regulación emocional o control de la expresión."
+                )
+            else:
+                texto.append(
+                    f"La expresión emocional muestra baja autenticidad ({auth_score*100:.0f}%), "
+                    "lo que podría indicar supresión emocional o expresión social controlada."
+                )
+            
+            # Microexpresiones específicas
+            if interp.get("microexpression_indicators"):
+                indicadores = interp["microexpression_indicators"]
+                for ind in indicadores:
+                    texto.append(
+                        f"Se detectó {ind['type']} con autenticidad {ind['authenticity']} - {ind['note']}."
+                    )
 
     # Correlaciones
     interpretaciones = []
@@ -111,8 +173,8 @@ def generar_informe_clinico(emocion, mach, narc, psych, corr):
         )
 
     texto.append(
-        "El análisis combina microexpresiones y rasgos de personalidad, ofreciendo una "
-        "visión integrada del perfil emocional y conductual, útil para investigación "
+        "El análisis combina microexpresiones, análisis FACS de Action Units y rasgos de personalidad, "
+        "ofreciendo una visión integrada del perfil emocional y conductual, útil para investigación "
         "pero no concluyente a nivel diagnóstico."
     )
 
@@ -120,7 +182,7 @@ def generar_informe_clinico(emocion, mach, narc, psych, corr):
 
 
 # ========================================
-# ENDPOINT PRINCIPAL
+# ENDPOINT PRINCIPAL (MODIFICADO CON FACS)
 # ========================================
 @app.post("/analyze")
 async def analyze(
@@ -139,6 +201,7 @@ async def analyze(
 
     historia_utilizada: str = Form(""),
     tipo_captura: str = Form("imagen"),
+    include_facs: bool = Form(True),  # NUEVO: permitir desactivar FACS
 ):
     if model is None:
         raise HTTPException(500, "Modelo no cargado")
@@ -146,6 +209,8 @@ async def analyze(
     # Procesar imagen
     contents = await file.read()
     img = Image.open(io.BytesIO(contents)).convert("RGB")
+    
+    # 1. ANÁLISIS DE EMOCIÓN (tu código original)
     tensor = transform(img).unsqueeze(0).to(device)
 
     with torch.no_grad():
@@ -153,6 +218,21 @@ async def analyze(
         probs = torch.softmax(out, dim=1)[0].cpu().numpy()
         pred_idx = int(probs.argmax())
         emocion = LABELS.get(pred_idx, "desconocido")
+
+    # 2. ANÁLISIS FACS (NUEVO)
+    facs_result = None
+    if include_facs and facs_analyzer:
+        try:
+            logger.info("Ejecutando análisis FACS...")
+            img_array = np.array(img)
+            facs_result = facs_analyzer.analyze(img_array)
+            if facs_result:
+                logger.info(f"✓ FACS completado: {len(facs_result.get('action_units', []))} AUs detectados")
+            else:
+                logger.warning("⚠️ FACS no detectó rostro")
+        except Exception as e:
+            logger.error(f"❌ Error en FACS: {e}")
+            facs_result = None
 
     # Subir imagen a Supabase Storage
     timestamp = int(datetime.utcnow().timestamp() * 1000)
@@ -200,10 +280,22 @@ async def analyze(
                 except:
                     pass
 
-    # Generar informe clínico
-    informe = generar_informe_clinico(emocion, mach, narc, psych, corr_info)
+    # Extraer datos FACS para guardar en BD (NUEVO)
+    aus_frecuentes = None
+    facs_promedio = None
+    if facs_result:
+        # Lista de códigos de AUs activos
+        aus_frecuentes = [au["code"] for au in facs_result.get("action_units", [])]
+        
+        # Promedio de intensidad de AUs
+        if aus_frecuentes:
+            intensidades = [au["intensity"] for au in facs_result.get("action_units", [])]
+            facs_promedio = sum(intensidades) / len(intensidades) if intensidades else 0
 
-    # Guardar registro final
+    # Generar informe clínico (MODIFICADO para incluir FACS)
+    informe = generar_informe_clinico(emocion, mach, narc, psych, corr_info, facs_result)
+
+    # Guardar registro final (MODIFICADO)
     row = {
         "nombre": nombre,
         "edad": edad,
@@ -223,8 +315,8 @@ async def analyze(
         "emociones_detectadas": [emocion],
         "correlaciones": corr_info,
 
-        "aus_frecuentes": None,
-        "facs_promedio": None,
+        "aus_frecuentes": aus_frecuentes,  # NUEVO
+        "facs_promedio": facs_promedio,    # NUEVO
 
         "historia_utilizada": historia_utilizada,
         "tipo_captura": tipo_captura,
@@ -236,10 +328,71 @@ async def analyze(
 
     insert = supabase.table("darklens_records").insert(row).execute()
 
-    return {
+    # Respuesta final (MODIFICADO para incluir FACS)
+    response = {
         "success": True,
         "emocion_detectada": emocion,
         "imagen_url": image_url,
         "registro_guardado": insert.data,
-        "informe": informe
+        "informe": informe,
+        
+        # NUEVO: Datos FACS separados
+        "facs_analysis": facs_result if facs_result else {
+            "disponible": False,
+            "mensaje": "FACS no disponible o no se detectó rostro"
+        }
+    }
+
+    return response
+
+
+# ========================================
+# ENDPOINT ADICIONAL: SOLO FACS (OPCIONAL)
+# ========================================
+@app.post("/analyze-facs-only")
+async def analyze_facs_only(file: UploadFile = File(...)):
+    """
+    Endpoint para analizar solo FACS sin guardar en BD
+    Útil para testing o análisis rápido
+    """
+    if not facs_analyzer:
+        raise HTTPException(
+            status_code=503,
+            detail="FACS no disponible. Verifica que MediaPipe esté instalado."
+        )
+    
+    try:
+        contents = await file.read()
+        img = Image.open(io.BytesIO(contents)).convert("RGB")
+        img_array = np.array(img)
+        
+        result = facs_analyzer.analyze(img_array)
+        
+        if not result:
+            return {
+                "success": False,
+                "message": "No se detectó ningún rostro en la imagen"
+            }
+        
+        return {
+            "success": True,
+            "facs_analysis": result
+        }
+        
+    except Exception as e:
+        logger.error(f"Error en análisis FACS: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ========================================
+# ENDPOINT DE SALUD
+# ========================================
+@app.get("/health")
+async def health_check():
+    """Verificar estado de la API y servicios"""
+    return {
+        "status": "healthy",
+        "modelo_cargado": model is not None,
+        "facs_disponible": facs_analyzer is not None,
+        "supabase_conectado": True  # Puedes agregar un ping real si quieres
     }
