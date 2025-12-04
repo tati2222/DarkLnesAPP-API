@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 # Inicializar el analizador FACS (global)
 facs_analyzer = None
 SUPABASE_URL = "https://cdhndtzuwtmvhiulvzbp.supabase.co"
-SUPABASE_KEY = "YOUR_SUPABASE_KEY"  # Reemplaza aquí por la real
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNkaG5kdHp1d3RtdmhpdWx2emJwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQzNTE1OTcsImV4cCI6MjA3OTkyNzU5N30.KeyAfqJuCjgSpmd0kRdjDppkJwBRlF9oGyN0ozJMt6M"  # Reemplaza aquí por la real
 
 MODEL_PATH = "modelo_microexpresiones.pth"
 
