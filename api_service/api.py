@@ -31,8 +31,9 @@ facs_analyzer = None
 SUPABASE_URL = "https://cdhndtzuwtmvhiulvzbp.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNkaG5kdHp1d3RtdmhpdWx2emJwIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2NDM1MTU5NywiZXhwIjoyMDc5OTI3NTk3fQ.-vqSP3Vy1qLPoDcTZfo58lhcs1ydTgsgPVh8yGyX5eU"
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(BASE_DIR, "modelo_microexpresiones.pth")
 
-MODEL_PATH = "modelo_microexpresiones.pth"
 
 # Si prefieres usar variables de entorno:
 # SUPABASE_URL = os.getenv("SUPABASE_URL")
