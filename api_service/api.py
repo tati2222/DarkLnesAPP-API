@@ -292,42 +292,39 @@ async def analyze(
             intensidades = [au["intensity"] for au in facs_result.get("action_units", [])]
             facs_promedio = sum(intensidades) / len(intensidades) if intensidades else 0
 
-    # Generar informe clínico (MODIFICADO para incluir FACS)
+      # Generar informe clínico (MODIFICADO para incluir FACS)
     informe = generar_informe_clinico(emocion, mach, narc, psych, corr_info, facs_result)
 
-  row = {
-    "nombre": nombre,
-    "edad": edad,
-    "genero": genero,
-    "pais": pais,
+    row = {
+        "nombre": nombre,
+        "edad": edad,
+        "genero": genero,
+        "pais": pais,
 
-    "mach": mach,
-    "narc": narc,
-    "psych": psych,
+        "mach": mach,
+        "narc": narc,
+        "psych": psych,
 
-    "tiempo_total_seg": tiempo_total_seg,
+        "tiempo_total_seg": tiempo_total_seg,
 
-    "emocion_principal": emocion,
-    "total_frames": 1,
-    "duracion_video": 0,
+        "emocion_principal": emocion,
+        "total_frames": 1,
+        "duracion_video": 0,
 
-    "emociones_detectadas": [emocion],
-    "correlaciones": corr_info,
+        "emociones_detectadas": [emocion],
+        "correlaciones": corr_info,
 
-    "aus_frecuentes": aus_frecuentes,
-    "facs_promedio": facs_promedio,
+        "aus_frecuentes": aus_frecuentes,
+        "facs_promedio": facs_promedio,
 
-    "historia_utilizada": historia_utilizada,
-    "tipo_captura": tipo_captura,
-    "imagen_url": image_url,
-    "imagen_analizada": True,
+        "historia_utilizada": historia_utilizada,
+        "tipo_captura": tipo_captura,
+        "imagen_url": image_url,
+        "imagen_analizada": True,
 
-    # NUEVO → ahora sí se guarda
-    "include_facs": include_facs,
-
-    "analisis_completo": informe
-}
-
+        "include_facs": include_facs,
+        "analisis_completo": informe
+    }
 
     insert = supabase.table("darklens_records").insert(row).execute()
 
