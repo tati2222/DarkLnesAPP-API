@@ -21,7 +21,7 @@ from supabase import create_client
 SUPABASE_URL = "https://cdhndtzuwtmvhiulvzbp.supabase.co"
 SUPABASE_KEY = "YOUR_SUPABASE_KEY"  # Reemplaza aquí por la real
 
-MODEL_PATH = "best_microexp_model.pth"
+MODEL_PATH = "modelo_microexpresiones.pth"
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 app = FastAPI()
