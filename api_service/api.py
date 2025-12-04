@@ -15,7 +15,7 @@ from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from supabase import create_client
-from api_service.facs_mediapipe import FACSMediaPipe
+from .facs_mediapipe import FACSMediaPipe
 import logging
 
 
