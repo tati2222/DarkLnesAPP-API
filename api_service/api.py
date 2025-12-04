@@ -29,9 +29,13 @@ logger = logging.getLogger(__name__)
 # Inicializar el analizador FACS (global)
 facs_analyzer = None
 SUPABASE_URL = "https://cdhndtzuwtmvhiulvzbp.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNkaG5kdHp1d3RtdmhpdWx2emJwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQzNTE1OTcsImV4cCI6MjA3OTkyNzU5N30.KeyAfqJuCjgSpmd0kRdjDppkJwBRlF9oGyN0ozJMt6M"  # Reemplaza aquí por la real
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNkaG5kdHp1d3RtdmhpdWx2emJwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQzNTE1OTcsImV4cCI6MjA3OTkyNzU5N30.KeyAfqJuCjgSpmd0kRdjDppkJwBRlF9oGyN0ozJMt6M"  # Reemplaza por la real o usa ENV
 
 MODEL_PATH = "modelo_microexpresiones.pth"
+
+# Si prefieres usar variables de entorno:
+# SUPABASE_URL = os.getenv("SUPABASE_URL")
+# SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 app = FastAPI()
@@ -41,12 +45,13 @@ app.add_middleware(
     allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
 )
 
+
 @app.get("/")
 def root():
-   return {
-    "message": "API funcionando correctamente",
-    "facs_disponible": facs_analyzer is not None
-}
+    return {
+        "message": "API funcionando correctamente",
+        "facs_disponible": facs_analyzer is not None
+    }
 
 
 @app.on_event("startup")
@@ -59,6 +64,7 @@ async def startup_event():
     except Exception as e:
         logger.warning(f"⚠️ FACS no disponible: {e}")
         facs_analyzer = None
+
 
 # ========================================
 # CARGA DEL MODELO EfficientNet-B0 con pesos guardados
@@ -121,12 +127,12 @@ def generar_informe_clinico(emocion, mach, narc, psych, corr, facs_data=None):
             f"El análisis FACS identificó {len(aus_activos)} Action Units activos: "
             f"{', '.join(aus_activos)}. "
         )
-        
+
         # Interpretación de autenticidad
         if facs_data.get("interpretation"):
             interp = facs_data["interpretation"]
             auth_score = interp.get("authenticity_score", 0)
-            
+
             if auth_score > 0.6:
                 texto.append(
                     f"La expresión emocional muestra una autenticidad de {auth_score*100:.0f}%, "
@@ -142,7 +148,7 @@ def generar_informe_clinico(emocion, mach, narc, psych, corr, facs_data=None):
                     f"La expresión emocional muestra baja autenticidad ({auth_score*100:.0f}%), "
                     "lo que podría indicar supresión emocional o expresión social controlada."
                 )
-            
+
             # Microexpresiones específicas
             if interp.get("microexpression_indicators"):
                 indicadores = interp["microexpression_indicators"]
@@ -209,7 +215,7 @@ async def analyze(
     # Procesar imagen
     contents = await file.read()
     img = Image.open(io.BytesIO(contents)).convert("RGB")
-    
+
     # 1. ANÁLISIS DE EMOCIÓN (tu código original)
     tensor = transform(img).unsqueeze(0).to(device)
 
@@ -286,13 +292,13 @@ async def analyze(
     if facs_result:
         # Lista de códigos de AUs activos
         aus_frecuentes = [au["code"] for au in facs_result.get("action_units", [])]
-        
+
         # Promedio de intensidad de AUs
         if aus_frecuentes:
             intensidades = [au["intensity"] for au in facs_result.get("action_units", [])]
             facs_promedio = sum(intensidades) / len(intensidades) if intensidades else 0
 
-      # Generar informe clínico (MODIFICADO para incluir FACS)
+    # Generar informe clínico (MODIFICADO para incluir FACS)
     informe = generar_informe_clinico(emocion, mach, narc, psych, corr_info, facs_result)
 
     row = {
@@ -335,7 +341,7 @@ async def analyze(
         "imagen_url": image_url,
         "registro_guardado": insert.data,
         "informe": informe,
-        
+
         # NUEVO: Datos FACS separados
         "facs_analysis": facs_result if facs_result else {
             "disponible": False,
@@ -360,25 +366,25 @@ async def analyze_facs_only(file: UploadFile = File(...)):
             status_code=503,
             detail="FACS no disponible. Verifica que MediaPipe esté instalado."
         )
-    
+
     try:
         contents = await file.read()
         img = Image.open(io.BytesIO(contents)).convert("RGB")
         img_array = np.array(img)
-        
+
         result = facs_analyzer.analyze(img_array)
-        
+
         if not result:
             return {
                 "success": False,
                 "message": "No se detectó ningún rostro en la imagen"
             }
-        
+
         return {
             "success": True,
             "facs_analysis": result
         }
-        
+
     except Exception as e:
         logger.error(f"Error en análisis FACS: {e}")
         raise HTTPException(status_code=500, detail=str(e))
