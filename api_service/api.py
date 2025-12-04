@@ -31,6 +31,10 @@ app.add_middleware(
     allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
 )
 
+@app.get("/")
+def root():
+    return {"message": "API funcionando correctamente"}
+
 # ========================================
 # CARGA DEL MODELO EfficientNet-B0 con pesos guardados
 # ========================================
