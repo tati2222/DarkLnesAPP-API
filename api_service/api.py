@@ -68,9 +68,6 @@ def root():
 # ========================================
 # UTIL: descargar modelo desde Supabase (si no está local)
 # ========================================
-# ========================================
-# UTIL: descargar modelo desde Supabase (si no está local)
-# ========================================
 
 PUBLIC_MODEL_URL = (
     "https://cdhndtzuwtmvhiulvzbp.supabase.co/storage/v1/object/public/"
