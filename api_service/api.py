@@ -68,36 +68,41 @@ def root():
 # ========================================
 # UTIL: descargar modelo desde Supabase (si no está local)
 # ========================================
-def download_model_from_supabase():
-    """
-    Intenta obtener una URL pública desde distintos buckets candidatos y descargar
-    el archivo binario del modelo. Devuelve True si el archivo queda presente localmente.
-    """
-    if os.path.exists(MODEL_PATH):
-        logger.info("Modelo ya existe localmente: %s", MODEL_PATH)
-        return True
+# ========================================
+# UTIL: descargar modelo desde Supabase (si no está local)
+# ========================================
 
-    PUBLIC_MODEL_URL = "https://cdhndtzuwtmvhiulvzbp.supabase.co/storage/v1/object/public/modelos/modelo_microexpresiones.pth"
+PUBLIC_MODEL_URL = (
+    "https://cdhndtzuwtmvhiulvzbp.supabase.co/storage/v1/object/public/"
+    "modelos/modelo_microexpresiones.pth"
+)
 
 def download_model_from_supabase():
+    """
+    Descarga el archivo del modelo desde una URL pública fija.
+    Devuelve True si el archivo queda guardado localmente.
+    """
     if os.path.exists(MODEL_PATH):
         logger.info("Modelo ya existe localmente: %s", MODEL_PATH)
         return True
 
     try:
-        logger.info("Descargando modelo desde URL fija...")
+        logger.info("Descargando modelo desde Supabase (URL fija)...")
         r = requests.get(PUBLIC_MODEL_URL, timeout=60)
+
         if r.status_code == 200:
             with open(MODEL_PATH, "wb") as f:
                 f.write(r.content)
-            logger.info("Modelo descargado y guardado en %s", MODEL_PATH)
+            logger.info("Modelo descargado correctamente en %s", MODEL_PATH)
             return True
         else:
-            logger.error("Fallo la descarga: %s", r.status_code)
+            logger.error("Fallo la descarga: código %s", r.status_code)
             return False
+
     except Exception as e:
         logger.error("Error descargando modelo: %s", e)
         return False
+
 
 # ========================================
 # STARTUP: inicializar FACS y asegurar modelo
