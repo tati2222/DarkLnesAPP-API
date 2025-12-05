@@ -247,10 +247,42 @@ async def analyze(
     file_ext = os.path.splitext(file.filename)[1]
     path = f"microexpresiones/{nombre}_{timestamp}{file_ext}"
 
-    upload = supabase.storage.from_("DARKLENS-IMAGES").upload(path, contents)
+      # 2. ANÁLISIS FACS (NUEVO)
+    facs_result = None
+    if include_facs and facs_analyzer:
+        try:
+            logger.info("Ejecutando análisis FACS...")
+            img_array = np.array(img)
+            facs_result = facs_analyzer.analyze(img_array)
+            if facs_result:
+                logger.info(f"✓ FACS completado: {len(facs_result.get('action_units', []))} AUs detectados")
+            else:
+                logger.warning("⚠️ FACS no detectó rostro")
+        except Exception as e:
+            logger.error(f"❌ Error en FACS: {e}")
+            facs_result = None
 
-    if upload.get("error"):
-        raise HTTPException(500, f"Error subiendo imagen: {upload['error']}")
+    # Subir imagen a Supabase Storage
+    timestamp = int(datetime.utcnow().timestamp() * 1000)
+    file_ext = os.path.splitext(file.filename)[1]
+    path = f"microexpresiones/{nombre}_{timestamp}{file_ext}"
+
+try:
+    upload = supabase.storage.from_("DARKLENS-IMAGES").upload(upload_path, file_bytes)
+except Exception as e:
+    raise HTTPException(status_code=500, detail=f"Error subiendo imagen: {str(e)}")
+
+if upload is None or not hasattr(upload, "key"):
+    raise HTTPException(status_code=500, detail="Error al subir imagen a Supabase")
+
+
+    public_url_response = supabase.storage.from_("DARKLENS-IMAGES").get_public_url(path)
+    image_url = public_url_response if isinstance(public_url_response, str) else public_url_response.get("publicUrl", "")
+
+    # Correlaciones cohortales
+    resp = supabase.table("darklens_records") \
+        .select("mach, narc, psych, emocion_principal") \
+        .execute()
 
     public_url_response = supabase.storage.from_("DARKLENS-IMAGES").get_public_url(path)
     image_url = public_url_response if isinstance(public_url_response, str) else public_url_response.get("publicUrl", "")
