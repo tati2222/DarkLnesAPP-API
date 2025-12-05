@@ -8,9 +8,9 @@ torch==2.1.0
 torchvision==0.16.0
 torchaudio==2.1.0
 
-# Computer Vision
+# Computer Vision - SOLO MediaPipe (SIN PyFeat)
 opencv-python-headless==4.8.1.78
-mediapipe==0.10.9
+mediapipe==0.10.9  # ✅ Ligero y compatible con Render
 Pillow==10.1.0
 
 # Data Science
@@ -28,4 +28,3 @@ supabase
 
 # Environment variables (optional)
 python-dotenv==1.0.0
-
