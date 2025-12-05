@@ -247,11 +247,12 @@ async def analyze(
     file_ext = os.path.splitext(file.filename)[1]
     path = f"microexpresiones/{nombre}_{timestamp}{file_ext}"
 
-    upload = supabase.storage.from_("images").upload(path, contents)
+    upload = supabase.storage.from_("DARKLENS-IMAGES").upload(path, contents)
+
     if upload.get("error"):
         raise HTTPException(500, f"Error subiendo imagen: {upload['error']}")
 
-    public_url_response = supabase.storage.from_("images").get_public_url(path)
+    public_url_response = supabase.storage.from_("DARKLENS-IMAGES").get_public_url(path)
     image_url = public_url_response if isinstance(public_url_response, str) else public_url_response.get("publicUrl", "")
 
     # Correlaciones cohortales
