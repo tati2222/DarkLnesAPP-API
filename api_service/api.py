@@ -13,6 +13,7 @@ from scipy import stats
 
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from supabase import create_client
 from .facs_mediapipe import FACSMediaPipe
@@ -195,24 +196,20 @@ def generar_informe_clinico(emocion, mach, narc, psych, corr, facs_data=None):
 @app.post("/analyze")
 async def analyze(
     file: UploadFile = File(...),
-
     nombre: str = Form(...),
     edad: int = Form(...),
     genero: str = Form(...),
     pais: str = Form(...),
-
     mach: float = Form(...),
     narc: float = Form(...),
     psych: float = Form(...),
-
     tiempo_total_seg: float = Form(...),
-
     historia_utilizada: str = Form(""),
     tipo_captura: str = Form("imagen"),
     include_facs: bool = Form(True),  # NUEVO: permitir desactivar FACS
 ):
     if model is None:
-        raise HTTPException(500, "Modelo no cargado")
+        raise HTTPException(status_code=500, detail="Modelo no cargado")
 
     # Procesar imagen
     contents = await file.read()
@@ -244,55 +241,55 @@ async def analyze(
 
     # Subir imagen a Supabase Storage
     timestamp = int(datetime.utcnow().timestamp() * 1000)
-    file_ext = os.path.splitext(file.filename)[1]
-    path = f"microexpresiones/{nombre}_{timestamp}{file_ext}"
+    file_ext = os.path.splitext(file.filename)[1] or ".jpg"
+    upload_path = f"microexpresiones/{nombre}_{timestamp}{file_ext}"
 
-      # 2. ANÁLISIS FACS (NUEVO)
-    facs_result = None
-    if include_facs and facs_analyzer:
-        try:
-            logger.info("Ejecutando análisis FACS...")
-            img_array = np.array(img)
-            facs_result = facs_analyzer.analyze(img_array)
-            if facs_result:
-                logger.info(f"✓ FACS completado: {len(facs_result.get('action_units', []))} AUs detectados")
-            else:
-                logger.warning("⚠️ FACS no detectó rostro")
-        except Exception as e:
-            logger.error(f"❌ Error en FACS: {e}")
-            facs_result = None
+    try:
+        # Convertir la imagen a bytes para subir
+        img_byte_arr = io.BytesIO()
+        img.save(img_byte_arr, format='JPEG' if file_ext.lower() in ['.jpg', '.jpeg'] else 'PNG')
+        file_bytes = img_byte_arr.getvalue()
+        
+        # Subir a Supabase
+        upload = supabase.storage.from_("DARKLENS-IMAGES").upload(upload_path, file_bytes)
+        
+        # El objeto upload es una respuesta de supabase, no un diccionario
+        # Verificar si hubo error
+        if hasattr(upload, 'error') and upload.error:
+            logger.error(f"Error subiendo imagen: {upload.error}")
+            raise HTTPException(status_code=500, detail=f"Error subiendo imagen: {upload.error}")
+            
+    except Exception as e:
+        logger.error(f"Error en upload: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error subiendo imagen: {str(e)}")
 
-    # Subir imagen a Supabase Storage
-    timestamp = int(datetime.utcnow().timestamp() * 1000)
-    file_ext = os.path.splitext(file.filename)[1]
-    path = f"microexpresiones/{nombre}_{timestamp}{file_ext}"
-
-try:
-    upload = supabase.storage.from_("DARKLENS-IMAGES").upload(upload_path, file_bytes)
-except Exception as e:
-    raise HTTPException(status_code=500, detail=f"Error subiendo imagen: {str(e)}")
-
-if upload is None or not hasattr(upload, "key"):
-    raise HTTPException(status_code=500, detail="Error al subir imagen a Supabase")
-
-
-    public_url_response = supabase.storage.from_("DARKLENS-IMAGES").get_public_url(path)
-    image_url = public_url_response if isinstance(public_url_response, str) else public_url_response.get("publicUrl", "")
-
-    # Correlaciones cohortales
-    resp = supabase.table("darklens_records") \
-        .select("mach, narc, psych, emocion_principal") \
-        .execute()
-
-    public_url_response = supabase.storage.from_("DARKLENS-IMAGES").get_public_url(path)
-    image_url = public_url_response if isinstance(public_url_response, str) else public_url_response.get("publicUrl", "")
+    # Obtener URL pública
+    try:
+        public_url_response = supabase.storage.from_("DARKLENS-IMAGES").get_public_url(upload_path)
+        # La respuesta puede ser un string o un objeto
+        if isinstance(public_url_response, str):
+            image_url = public_url_response
+        else:
+            # Intentar obtener la URL de diferentes maneras
+            image_url = getattr(public_url_response, 'publicUrl', '') or getattr(public_url_response, 'public_url', '') or ''
+    except Exception as e:
+        logger.warning(f"No se pudo obtener URL pública: {e}")
+        image_url = ""
 
     # Correlaciones cohortales
-    resp = supabase.table("darklens_records") \
-        .select("mach, narc, psych, emocion_principal") \
-        .execute()
-
-    df = pd.DataFrame(resp.data)
+    try:
+        resp = supabase.table("darklens_records") \
+            .select("mach, narc, psych, emocion_principal") \
+            .execute()
+        
+        if hasattr(resp, 'error') and resp.error:
+            logger.warning(f"Error obteniendo datos para correlaciones: {resp.error}")
+            df = pd.DataFrame()
+        else:
+            df = pd.DataFrame(resp.data if resp.data else [])
+    except Exception as e:
+        logger.warning(f"Error en consulta de correlaciones: {e}")
+        df = pd.DataFrame()
 
     corr_info = {
         "rho_mach": None,
@@ -305,21 +302,21 @@ if upload is None or not hasattr(upload, "key"):
 
     if len(df) >= 3:
         df = df.dropna()
-        if "emocion_principal" in df:
+        if "emocion_principal" in df.columns:
             df["emotion_code"] = df["emocion_principal"].apply(emotion_to_code)
             if df["emotion_code"].nunique() > 1:
                 try:
                     corr_info["rho_mach"], corr_info["p_mach"] = stats.spearmanr(df["mach"], df["emotion_code"])
-                except:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Error correlación mach: {e}")
                 try:
                     corr_info["rho_narc"], corr_info["p_narc"] = stats.spearmanr(df["narc"], df["emotion_code"])
-                except:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Error correlación narc: {e}")
                 try:
                     corr_info["rho_psych"], corr_info["p_psych"] = stats.spearmanr(df["psych"], df["emotion_code"])
-                except:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Error correlación psych: {e}")
 
     # Extraer datos FACS para guardar en BD (NUEVO)
     aus_frecuentes = None
@@ -341,42 +338,44 @@ if upload is None or not hasattr(upload, "key"):
         "edad": edad,
         "genero": genero,
         "pais": pais,
-
         "mach": mach,
         "narc": narc,
         "psych": psych,
-
         "tiempo_total_seg": tiempo_total_seg,
-
         "emocion_principal": emocion,
         "total_frames": 1,
         "duracion_video": 0,
-
         "emociones_detectadas": [emocion],
         "correlaciones": corr_info,
-
         "aus_frecuentes": aus_frecuentes,
         "facs_promedio": facs_promedio,
-
         "historia_utilizada": historia_utilizada,
         "tipo_captura": tipo_captura,
         "imagen_url": image_url,
         "imagen_analizada": True,
-
         "include_facs": include_facs,
         "analisis_completo": informe
     }
 
-    insert = supabase.table("darklens_records").insert(row).execute()
+    try:
+        insert = supabase.table("darklens_records").insert(row).execute()
+        if hasattr(insert, 'error') and insert.error:
+            logger.error(f"Error insertando registro: {insert.error}")
+            # Continuar aunque falle la inserción, pero devolver warning
+            registro_guardado = False
+        else:
+            registro_guardado = True
+    except Exception as e:
+        logger.error(f"Error en inserción a BD: {e}")
+        registro_guardado = False
 
     # Respuesta final (MODIFICADO para incluir FACS)
     response = {
         "success": True,
         "emocion_detectada": emocion,
         "imagen_url": image_url,
-        "registro_guardado": insert.data,
+        "registro_guardado": registro_guardado,
         "informe": informe,
-
         # NUEVO: Datos FACS separados
         "facs_analysis": facs_result if facs_result else {
             "disponible": False,
@@ -435,5 +434,5 @@ async def health_check():
         "status": "healthy",
         "modelo_cargado": model is not None,
         "facs_disponible": facs_analyzer is not None,
-        "supabase_conectado": True  # Puedes agregar un ping real si quieres
+        "supabase_conectado": True
     }
