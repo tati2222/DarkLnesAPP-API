@@ -1,6 +1,8 @@
 import os
 import io
 from datetime import datetime
+import requests
+import logging
 
 import torch
 import torch.nn as nn
@@ -16,29 +18,33 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from supabase import create_client
-from .facs_mediapipe import FACSMediaPipe
-import logging
 
+# Intentar import flexible de FACSMediaPipe (soporta import relativo o absoluto)
+try:
+    from .facs_mediapipe import FACSMediaPipe
+except Exception:
+    try:
+        from facs_mediapipe import FACSMediaPipe
+    except Exception:
+        FACSMediaPipe = None
 
 # ========================================
 # CONFIG
 # ========================================
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Inicializar el analizador FACS (global)
-facs_analyzer = None
+# Supabase (mantengo la config que tenías; considerá usar variables de entorno en producción)
 SUPABASE_URL = "https://cdhndtzuwtmvhiulvzbp.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNkaG5kdHp1d3RtdmhpdWx2emJwIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2NDM1MTU5NywiZXhwIjoyMDc5OTI3NTk3fQ.-vqSP3Vy1qLPoDcTZfo58lhcs1ydTgsgPVh8yGyX5eU"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNkaG5kdHp1d3JtdmhpdWx2emJwIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2NDM1MTU5NywiZXhwIjoyMDc5OTI3NTk3fQ.-vqSP3Vy1qLPoDcTZfo58lhcs1ydTgsgPVh8yGyX5eU"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_PATH = os.path.join(BASE_DIR, "modelo_microexpresiones.pth")
+# Nombre exacto que me dijiste
+MODEL_FILENAME = "modelo_microexpresiones.pth"
+MODEL_PATH = os.path.join(BASE_DIR, MODEL_FILENAME)
 
-
-# Si prefieres usar variables de entorno:
-# SUPABASE_URL = os.getenv("SUPABASE_URL")
-# SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+# Bucket(s) posibles en Supabase donde podrías subir el modelo
+MODEL_BUCKET_CANDIDATES = ["modelos", "Modelos", "model", "modelo", "MODEL", "DARKLENS-IMAGES"]
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 app = FastAPI()
@@ -48,32 +54,112 @@ app.add_middleware(
     allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
 )
 
+# Estado globales
+facs_analyzer = None
 
 @app.get("/")
 def root():
     return {
         "message": "API funcionando correctamente",
-        "facs_disponible": facs_analyzer is not None
+        "facs_disponible": facs_analyzer is not None,
+        "modelo_local": os.path.exists(MODEL_PATH)
     }
 
+# ========================================
+# UTIL: descargar modelo desde Supabase (si no está local)
+# ========================================
+def download_model_from_supabase():
+    """
+    Intenta obtener una URL pública desde distintos buckets candidatos y descargar
+    el archivo binario del modelo. Devuelve True si el archivo queda presente localmente.
+    """
+    if os.path.exists(MODEL_PATH):
+        logger.info("Modelo ya existe localmente: %s", MODEL_PATH)
+        return True
 
+    PUBLIC_MODEL_URL = "https://cdhndtzuwtmvhiulvzbp.supabase.co/storage/v1/object/public/modelos/modelo_microexpresiones.pth"
+
+def download_model_from_supabase():
+    if os.path.exists(MODEL_PATH):
+        logger.info("Modelo ya existe localmente: %s", MODEL_PATH)
+        return True
+
+    try:
+        logger.info("Descargando modelo desde URL fija...")
+        r = requests.get(PUBLIC_MODEL_URL, timeout=60)
+        if r.status_code == 200:
+            with open(MODEL_PATH, "wb") as f:
+                f.write(r.content)
+            logger.info("Modelo descargado y guardado en %s", MODEL_PATH)
+            return True
+        else:
+            logger.error("Fallo la descarga: %s", r.status_code)
+            return False
+    except Exception as e:
+        logger.error("Error descargando modelo: %s", e)
+        return False
+
+# ========================================
+# STARTUP: inicializar FACS y asegurar modelo
+# ========================================
 @app.on_event("startup")
 async def startup_event():
-    global facs_analyzer
+    global facs_analyzer, model
+
+    # Inicializar FACS si está disponible el módulo
     try:
-        logger.info("Inicializando analizador FACS...")
-        facs_analyzer = FACSMediaPipe()
-        logger.info("✓ FACS listo")
+        if FACSMediaPipe:
+            logger.info("Inicializando analizador FACS...")
+            facs_analyzer = FACSMediaPipe()
+            logger.info("✓ FACS listo")
+        else:
+            facs_analyzer = None
+            logger.warning("FACSMediaPipe no disponible (archivo facs_mediapipe.py ausente o error en import).")
     except Exception as e:
-        logger.warning(f"⚠️ FACS no disponible: {e}")
         facs_analyzer = None
+        logger.warning("⚠️ FACS no disponible: %s", e)
 
+    # Asegurar que el modelo exista localmente (si no, intentar descargar desde Supabase)
+    if not os.path.exists(MODEL_PATH):
+        download_ok = download_model_from_supabase()
+        if not download_ok:
+            logger.warning("Modelo no encontrado localmente y no se pudo descargar. El endpoint /analyze devolverá error.")
+
+    # Cargar modelo (si está)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    num_classes = 7
+
+    try:
+        if os.path.exists(MODEL_PATH):
+            # Instanciar la misma arquitectura que usaste en entrenamiento (weights=None)
+            model_local = models.efficientnet_b0(weights=None)
+            model_local.classifier[1] = nn.Linear(model_local.classifier[1].in_features, num_classes)
+
+            # Cargar en modo binario
+            with open(MODEL_PATH, "rb") as f:
+                state = torch.load(f, map_location=device)
+
+            # Si el archivo contiene un 'state_dict' guardado como diccionario, lo cargamos
+            if isinstance(state, dict):
+                model_local.load_state_dict(state)
+            else:
+                # Si por alguna razón el archivo contiene el modelo completo, lo asignamos
+                model_local = state
+
+            model_local.to(device)
+            model_local.eval()
+            model = model_local
+            logger.info("Modelo cargado correctamente desde %s", MODEL_PATH)
+        else:
+            model = None
+            logger.warning("No se encontró el archivo del modelo; model queda None.")
+    except Exception as e:
+        model = None
+        logger.error("Error cargando modelo: %s", e)
 
 # ========================================
-# CARGA DEL MODELO EfficientNet-B0 con pesos guardados
+# Configuración común: labels y transform
 # ========================================
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 num_classes = 7
 LABELS = {
     0: "anger",
@@ -92,22 +178,9 @@ transform = transforms.Compose([
                          [0.229, 0.224, 0.225])
 ])
 
-# Instanciar arquitectura y cargar pesos
-try:
-    model = models.efficientnet_b0(weights=None)
-    model.classifier[1] = nn.Linear(model.classifier[1].in_features, num_classes)
-    model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
-    model.to(device)
-    model.eval()
-except Exception as e:
-    print("Error cargando modelo:", e)
-    model = None
-
-
 def emotion_to_code(e):
     inv = {v: k for k, v in LABELS.items()}
     return inv.get(e, -1)
-
 
 # ========================================
 # FUNCIÓN PARA REDACTAR INFORME CLÍNICO
@@ -117,13 +190,11 @@ def generar_informe_clinico(emocion, mach, narc, psych, corr, facs_data=None):
 
     texto.append(f"La emoción predominante detectada es **{emocion}**.")
 
-    # Rasgos
     texto.append(
         f"En los rasgos de la tríada oscura, el participante presentó: "
         f"Maquiavelismo = {mach}, Narcisismo = {narc}, Psicopatía = {psych}."
     )
 
-    # Análisis FACS (NUEVO)
     if facs_data and facs_data.get("action_units"):
         aus_activos = [au["code"] for au in facs_data["action_units"]]
         texto.append(
@@ -131,28 +202,22 @@ def generar_informe_clinico(emocion, mach, narc, psych, corr, facs_data=None):
             f"{', '.join(aus_activos)}. "
         )
 
-        # Interpretación de autenticidad
-        if facs_data.get("interpretation"):
-            interp = facs_data["interpretation"]
+        interp = facs_data.get("interpretation")
+        if interp:
             auth_score = interp.get("authenticity_score", 0)
-
             if auth_score > 0.6:
                 texto.append(
-                    f"La expresión emocional muestra una autenticidad de {auth_score*100:.0f}%, "
-                    "indicando que la emoción detectada presenta marcadores fisiológicos consistentes."
+                    f"La expresión emocional muestra una autenticidad de {auth_score*100:.0f}%."
                 )
             elif auth_score > 0.3:
                 texto.append(
-                    f"La expresión emocional presenta una autenticidad moderada ({auth_score*100:.0f}%), "
-                    "lo que sugiere una posible regulación emocional o control de la expresión."
+                    f"La expresión emocional presenta una autenticidad moderada ({auth_score*100:.0f}%)."
                 )
             else:
                 texto.append(
-                    f"La expresión emocional muestra baja autenticidad ({auth_score*100:.0f}%), "
-                    "lo que podría indicar supresión emocional o expresión social controlada."
+                    f"La expresión emocional muestra baja autenticidad ({auth_score*100:.0f}%)."
                 )
 
-            # Microexpresiones específicas
             if interp.get("microexpression_indicators"):
                 indicadores = interp["microexpression_indicators"]
                 for ind in indicadores:
@@ -160,7 +225,6 @@ def generar_informe_clinico(emocion, mach, narc, psych, corr, facs_data=None):
                         f"Se detectó {ind['type']} con autenticidad {ind['authenticity']} - {ind['note']}."
                     )
 
-    # Correlaciones
     interpretaciones = []
     if corr.get("rho_mach") not in [None, "null"]:
         interpretaciones.append("tendencias manipulativas (maquiavelismo)")
@@ -172,8 +236,7 @@ def generar_informe_clinico(emocion, mach, narc, psych, corr, facs_data=None):
     if interpretaciones:
         texto.append(
             "Las correlaciones observadas sugieren una relación entre la expresión emocional "
-            f"y {', '.join(interpretaciones)}. Estos datos deben interpretarse con cautela, "
-            "ya que dependen del tamaño muestral y del contexto."
+            f"y {', '.join(interpretaciones)}. Estos datos deben interpretarse con cautela."
         )
     else:
         texto.append(
@@ -189,9 +252,8 @@ def generar_informe_clinico(emocion, mach, narc, psych, corr, facs_data=None):
 
     return " ".join(texto)
 
-
 # ========================================
-# ENDPOINT PRINCIPAL (MODIFICADO CON FACS)
+# ENDPOINT PRINCIPAL
 # ========================================
 @app.post("/analyze")
 async def analyze(
@@ -206,17 +268,22 @@ async def analyze(
     tiempo_total_seg: float = Form(...),
     historia_utilizada: str = Form(""),
     tipo_captura: str = Form("imagen"),
-    include_facs: bool = Form(True),  # NUEVO: permitir desactivar FACS
+    include_facs: bool = Form(True),
 ):
-    if model is None:
-        raise HTTPException(status_code=500, detail="Modelo no cargado")
+    # Verificamos modelo
+    if 'model' not in globals() or model is None:
+        raise HTTPException(status_code=500, detail="Modelo no cargado en el servidor. Ver logs.")
 
     # Procesar imagen
     contents = await file.read()
-    img = Image.open(io.BytesIO(contents)).convert("RGB")
+    try:
+        img = Image.open(io.BytesIO(contents)).convert("RGB")
+    except Exception as e:
+        logger.error("Error al abrir imagen: %s", e)
+        raise HTTPException(status_code=400, detail="Imagen inválida")
 
-    # 1. ANÁLISIS DE EMOCIÓN (tu código original)
-    tensor = transform(img).unsqueeze(0).to(device)
+    # 1) Predicción de emoción
+    tensor = transform(img).unsqueeze(0).to(next(model.parameters()).device)
 
     with torch.no_grad():
         out = model(tensor)
@@ -224,7 +291,7 @@ async def analyze(
         pred_idx = int(probs.argmax())
         emocion = LABELS.get(pred_idx, "desconocido")
 
-    # 2. ANÁLISIS FACS (NUEVO)
+    # 2) FACS (si disponible)
     facs_result = None
     if include_facs and facs_analyzer:
         try:
@@ -232,63 +299,50 @@ async def analyze(
             img_array = np.array(img)
             facs_result = facs_analyzer.analyze(img_array)
             if facs_result:
-                logger.info(f"✓ FACS completado: {len(facs_result.get('action_units', []))} AUs detectados")
+                logger.info("✓ FACS completado")
             else:
                 logger.warning("⚠️ FACS no detectó rostro")
         except Exception as e:
-            logger.error(f"❌ Error en FACS: {e}")
+            logger.error("Error en FACS: %s", e)
             facs_result = None
 
-    # Subir imagen a Supabase Storage
+    # 3) Subir imagen a Supabase Storage
     timestamp = int(datetime.utcnow().timestamp() * 1000)
     file_ext = os.path.splitext(file.filename)[1] or ".jpg"
     upload_path = f"microexpresiones/{nombre}_{timestamp}{file_ext}"
 
     try:
-        # Convertir la imagen a bytes para subir
         img_byte_arr = io.BytesIO()
         img.save(img_byte_arr, format='JPEG' if file_ext.lower() in ['.jpg', '.jpeg'] else 'PNG')
         file_bytes = img_byte_arr.getvalue()
-        
-        # Subir a Supabase
+
         upload = supabase.storage.from_("DARKLENS-IMAGES").upload(upload_path, file_bytes)
-        
-        # El objeto upload es una respuesta de supabase, no un diccionario
-        # Verificar si hubo error
-        if hasattr(upload, 'error') and upload.error:
-            logger.error(f"Error subiendo imagen: {upload.error}")
+
+        # Verificar si supabase devolvió error
+        if hasattr(upload, "error") and upload.error:
+            logger.error("Error subiendo imagen: %s", upload.error)
             raise HTTPException(status_code=500, detail=f"Error subiendo imagen: {upload.error}")
-            
     except Exception as e:
-        logger.error(f"Error en upload: {str(e)}")
+        logger.error("Error en upload: %s", e)
         raise HTTPException(status_code=500, detail=f"Error subiendo imagen: {str(e)}")
 
     # Obtener URL pública
     try:
-        public_url_response = supabase.storage.from_("DARKLENS-IMAGES").get_public_url(upload_path)
-        # La respuesta puede ser un string o un objeto
-        if isinstance(public_url_response, str):
-            image_url = public_url_response
+        url_resp = supabase.storage.from_("DARKLENS-IMAGES").get_public_url(upload_path)
+        if isinstance(url_resp, str):
+            image_url = url_resp
         else:
-            # Intentar obtener la URL de diferentes maneras
-            image_url = getattr(public_url_response, 'publicUrl', '') or getattr(public_url_response, 'public_url', '') or ''
+            image_url = getattr(url_resp, "publicUrl", "") or getattr(url_resp, "public_url", "") or ""
     except Exception as e:
-        logger.warning(f"No se pudo obtener URL pública: {e}")
+        logger.warning("No se pudo obtener URL pública: %s", e)
         image_url = ""
 
-    # Correlaciones cohortales
+    # 4) Correlaciones cohortales
     try:
-        resp = supabase.table("darklens_records") \
-            .select("mach, narc, psych, emocion_principal") \
-            .execute()
-        
-        if hasattr(resp, 'error') and resp.error:
-            logger.warning(f"Error obteniendo datos para correlaciones: {resp.error}")
-            df = pd.DataFrame()
-        else:
-            df = pd.DataFrame(resp.data if resp.data else [])
+        resp = supabase.table("darklens_records").select("mach, narc, psych, emocion_principal").execute()
+        df = pd.DataFrame(resp.data if resp.data else [])
     except Exception as e:
-        logger.warning(f"Error en consulta de correlaciones: {e}")
+        logger.warning("Error en consulta de correlaciones: %s", e)
         df = pd.DataFrame()
 
     corr_info = {
@@ -300,39 +354,30 @@ async def analyze(
         "p_psych": None,
     }
 
-    if len(df) >= 3:
-        df = df.dropna()
-        if "emocion_principal" in df.columns:
+    if len(df) >= 3 and "emocion_principal" in df.columns:
+        try:
+            df = df.dropna()
             df["emotion_code"] = df["emocion_principal"].apply(emotion_to_code)
             if df["emotion_code"].nunique() > 1:
-                try:
-                    corr_info["rho_mach"], corr_info["p_mach"] = stats.spearmanr(df["mach"], df["emotion_code"])
-                except Exception as e:
-                    logger.warning(f"Error correlación mach: {e}")
-                try:
-                    corr_info["rho_narc"], corr_info["p_narc"] = stats.spearmanr(df["narc"], df["emotion_code"])
-                except Exception as e:
-                    logger.warning(f"Error correlación narc: {e}")
-                try:
-                    corr_info["rho_psych"], corr_info["p_psych"] = stats.spearmanr(df["psych"], df["emotion_code"])
-                except Exception as e:
-                    logger.warning(f"Error correlación psych: {e}")
+                corr_info["rho_mach"], corr_info["p_mach"] = stats.spearmanr(df["mach"], df["emotion_code"])
+                corr_info["rho_narc"], corr_info["p_narc"] = stats.spearmanr(df["narc"], df["emotion_code"])
+                corr_info["rho_psych"], corr_info["p_psych"] = stats.spearmanr(df["psych"], df["emotion_code"])
+        except Exception as e:
+            logger.warning("Error calculando correlaciones: %s", e)
 
-    # Extraer datos FACS para guardar en BD (NUEVO)
+    # 5) Extraer datos FACS
     aus_frecuentes = None
     facs_promedio = None
     if facs_result:
-        # Lista de códigos de AUs activos
         aus_frecuentes = [au["code"] for au in facs_result.get("action_units", [])]
+        intensidades = [au.get("intensity", 0) for au in facs_result.get("action_units", [])]
+        if intensidades:
+            facs_promedio = sum(intensidades) / len(intensidades)
 
-        # Promedio de intensidad de AUs
-        if aus_frecuentes:
-            intensidades = [au["intensity"] for au in facs_result.get("action_units", [])]
-            facs_promedio = sum(intensidades) / len(intensidades) if intensidades else 0
-
-    # Generar informe clínico (MODIFICADO para incluir FACS)
+    # 6) Generar informe
     informe = generar_informe_clinico(emocion, mach, narc, psych, corr_info, facs_result)
 
+    # 7) Guardar en BD
     row = {
         "nombre": nombre,
         "edad": edad,
@@ -359,80 +404,55 @@ async def analyze(
 
     try:
         insert = supabase.table("darklens_records").insert(row).execute()
-        if hasattr(insert, 'error') and insert.error:
-            logger.error(f"Error insertando registro: {insert.error}")
-            # Continuar aunque falle la inserción, pero devolver warning
-            registro_guardado = False
-        else:
-            registro_guardado = True
+        registro_guardado = not (hasattr(insert, "error") and insert.error)
+        if not registro_guardado:
+            logger.warning("Insert returned error: %s", getattr(insert, "error", None))
     except Exception as e:
-        logger.error(f"Error en inserción a BD: {e}")
+        logger.error("Error en inserción a BD: %s", e)
         registro_guardado = False
 
-    # Respuesta final (MODIFICADO para incluir FACS)
-    response = {
+    # Respuesta final
+    return {
         "success": True,
         "emocion_detectada": emocion,
         "imagen_url": image_url,
         "registro_guardado": registro_guardado,
         "informe": informe,
-        # NUEVO: Datos FACS separados
         "facs_analysis": facs_result if facs_result else {
             "disponible": False,
             "mensaje": "FACS no disponible o no se detectó rostro"
         }
     }
 
-    return response
-
-
 # ========================================
-# ENDPOINT ADICIONAL: SOLO FACS (OPCIONAL)
+# ENDPOINT: SOLO FACS (Útil para testing)
 # ========================================
 @app.post("/analyze-facs-only")
 async def analyze_facs_only(file: UploadFile = File(...)):
-    """
-    Endpoint para analizar solo FACS sin guardar en BD
-    Útil para testing o análisis rápido
-    """
     if not facs_analyzer:
-        raise HTTPException(
-            status_code=503,
-            detail="FACS no disponible. Verifica que MediaPipe esté instalado."
-        )
+        raise HTTPException(status_code=503, detail="FACS no disponible. Verifica que MediaPipe esté instalado.")
 
     try:
         contents = await file.read()
         img = Image.open(io.BytesIO(contents)).convert("RGB")
-        img_array = np.array(img)
-
-        result = facs_analyzer.analyze(img_array)
+        result = facs_analyzer.analyze(np.array(img))
 
         if not result:
-            return {
-                "success": False,
-                "message": "No se detectó ningún rostro en la imagen"
-            }
+            return {"success": False, "message": "No se detectó rostro"}
 
-        return {
-            "success": True,
-            "facs_analysis": result
-        }
-
+        return {"success": True, "facs_analysis": result}
     except Exception as e:
-        logger.error(f"Error en análisis FACS: {e}")
+        logger.error("Error en análisis FACS: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
-
 
 # ========================================
 # ENDPOINT DE SALUD
 # ========================================
 @app.get("/health")
 async def health_check():
-    """Verificar estado de la API y servicios"""
     return {
         "status": "healthy",
-        "modelo_cargado": model is not None,
+        "modelo_cargado": 'model' in globals() and model is not None,
         "facs_disponible": facs_analyzer is not None,
         "supabase_conectado": True
     }
