@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 # Supabase (mantengo la config que tenías; considerá usar variables de entorno en producción)
 SUPABASE_URL = "https://cdhndtzuwtmvhiulvzbp.supabase.co"
-SUPABASE_KEY = "sb_secret_IMQYAz5T-nAWbZUvFtBg1Q_IpdcdOJK"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNkaG5kdHp1d3RtdmhpdWx2emJwIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2NDM1MTU5NywiZXhwIjoyMDc5OTI3NTk3fQ.-vqSP3Vy1qLPoDcTZfo58lhcs1ydTgsgPVh8yGyX5eU"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # Nombre exacto que me dijiste
