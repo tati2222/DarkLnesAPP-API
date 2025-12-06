@@ -255,7 +255,7 @@ def generar_informe_clinico(emocion, mach, narc, psych, corr, facs_data=None):
     return " ".join(texto)
 
 # ========================================
-# ENDPOINT PRINCIPAL
+# ENDPOINT PRINCIPAL - CORREGIDO PARA FACS
 # ========================================
 @app.post("/analyze")
 async def analyze(
@@ -293,20 +293,73 @@ async def analyze(
         pred_idx = int(probs.argmax())
         emocion = LABELS.get(pred_idx, "desconocido")
 
-    # 2) FACS (si disponible)
+    # 2) FACS (si disponible) - CORRECCIÓN CRÍTICA
     facs_result = None
+    facs_analysis_data = None  # Nueva variable para datos FACS formateados
+    
     if include_facs and facs_analyzer:
         try:
             logger.info("Ejecutando análisis FACS...")
             img_array = np.array(img)
             facs_result = facs_analyzer.analyze(img_array)
+            
             if facs_result:
                 logger.info("✓ FACS completado")
+                logger.info(f"Datos FACS brutos: {facs_result}")
+                
+                # Formatear datos FACS para el frontend
+                facs_analysis_data = {
+                    "action_units": facs_result.get("action_units", []),
+                    "emotions_mediapipe": facs_result.get("emotions_mediapipe", {}),
+                    "interpretation": facs_result.get("interpretation", {}),
+                    "confidence": facs_result.get("confidence", 0.0)
+                }
+                
+                # Asegurar que los AUs tengan el formato correcto
+                if "action_units" in facs_analysis_data:
+                    for au in facs_analysis_data["action_units"]:
+                        # Asegurar que tenga todos los campos necesarios
+                        if "au" not in au and "code" in au:
+                            au["au"] = au["code"]
+                        if "numero" not in au and "code" in au:
+                            # Extraer número del código (ej: "AU01" -> 1)
+                            try:
+                                au["numero"] = int(au["code"][2:])
+                            except:
+                                au["numero"] = 0
             else:
                 logger.warning("⚠️ FACS no detectó rostro")
+                # Crear estructura FACS vacía pero con el formato correcto
+                facs_analysis_data = {
+                    "action_units": [],
+                    "emotions_mediapipe": {},
+                    "interpretation": {
+                        "primary_emotion": "neutral",
+                        "confidence": 0.0,
+                        "microexpression_indicators": [],
+                        "authenticity_score": 0.0
+                    },
+                    "confidence": 0.0
+                }
+                
         except Exception as e:
             logger.error("Error en FACS: %s", e)
             facs_result = None
+            facs_analysis_data = None
+    
+    # Si no hay FACS pero se solicitó, crear estructura vacía
+    if include_facs and not facs_analysis_data:
+        facs_analysis_data = {
+            "action_units": [],
+            "emotions_mediapipe": {},
+            "interpretation": {
+                "primary_emotion": emocion,  # Usar la emoción del modelo
+                "confidence": float(probs[pred_idx]),
+                "microexpression_indicators": [],
+                "authenticity_score": 0.0
+            },
+            "confidence": float(probs[pred_idx])
+        }
 
     # 3) Subir imagen a Supabase Storage
     timestamp = int(datetime.utcnow().timestamp() * 1000)
@@ -367,19 +420,20 @@ async def analyze(
         except Exception as e:
             logger.warning("Error calculando correlaciones: %s", e)
 
-    # 5) Extraer datos FACS
+    # 5) Extraer datos FACS en formato para frontend - CORRECCIÓN CRÍTICA
     aus_frecuentes = None
     facs_promedio = None
-    if facs_result:
-        aus_frecuentes = [au["code"] for au in facs_result.get("action_units", [])]
-        intensidades = [au.get("intensity", 0) for au in facs_result.get("action_units", [])]
+    
+    if facs_analysis_data and "action_units" in facs_analysis_data:
+        aus_frecuentes = [au["code"] for au in facs_analysis_data["action_units"]]
+        intensidades = [au.get("intensity", 0) for au in facs_analysis_data["action_units"]]
         if intensidades:
             facs_promedio = sum(intensidades) / len(intensidades)
 
     # 6) Generar informe
-    informe = generar_informe_clinico(emocion, mach, narc, psych, corr_info, facs_result)
+    informe = generar_informe_clinico(emocion, mach, narc, psych, corr_info, facs_analysis_data)
 
-    # 7) Guardar en BD
+    # 7) Guardar en BD - INCLUIR DATOS FACS
     row = {
         "nombre": nombre,
         "edad": edad,
@@ -404,6 +458,17 @@ async def analyze(
         "analisis_completo": informe
     }
 
+    # Intentar insertar datos FACS si existen
+    if facs_analysis_data:
+        try:
+            # Intentar convertir a JSON para guardar en BD
+            import json
+            facs_json = json.dumps(facs_analysis_data)
+            row["facs_json"] = facs_json
+            logger.info("✅ Datos FACS preparados para guardar en BD")
+        except Exception as e:
+            logger.warning("No se pudo serializar datos FACS para BD: %s", e)
+
     try:
         insert = supabase.table("darklens_records").insert(row).execute()
         registro_guardado = not (hasattr(insert, "error") and insert.error)
@@ -413,21 +478,38 @@ async def analyze(
         logger.error("Error en inserción a BD: %s", e)
         registro_guardado = False
 
-    # Respuesta final
-    return {
+    # Respuesta final - INCLUIR DATOS FACS EN FORMATO CORRECTO
+    response_data = {
         "success": True,
         "emocion_detectada": emocion,
+        "emocion_principal": emocion,
         "imagen_url": image_url,
         "registro_guardado": registro_guardado,
         "informe": informe,
-        "facs_analysis": facs_result if facs_result else {
-            "disponible": False,
-            "mensaje": "FACS no disponible o no se detectó rostro"
-        }
+        "facs": facs_analysis_data if facs_analysis_data else {
+            "action_units": [],
+            "emotions_mediapipe": {},
+            "interpretation": {
+                "primary_emotion": emocion,
+                "confidence": float(probs[pred_idx]),
+                "microexpression_indicators": [],
+                "authenticity_score": 0.0
+            },
+            "confidence": float(probs[pred_idx])
+        },
+        "probabilidades": {LABELS[i]: float(probs[i]) for i in range(len(probs))}
     }
+    
+    # Añadir datos adicionales para el frontend
+    if facs_analysis_data and "action_units" in facs_analysis_data:
+        response_data["total_action_units"] = len(facs_analysis_data["action_units"])
+        response_data["aus_list"] = [au["code"] for au in facs_analysis_data["action_units"]]
+    
+    logger.info(f"✅ Respuesta API preparada. Tiene FACS: {'facs' in response_data}")
+    return response_data
 
 # ========================================
-# ENDPOINT: SOLO FACS (Útil para testing)
+# ENDPOINT: SOLO FACS (Útil para testing) - CORREGIDO
 # ========================================
 @app.post("/analyze-facs-only")
 async def analyze_facs_only(file: UploadFile = File(...)):
@@ -442,13 +524,38 @@ async def analyze_facs_only(file: UploadFile = File(...)):
         if not result:
             return {"success": False, "message": "No se detectó rostro"}
 
-        return {"success": True, "facs_analysis": result}
+        # Formatear respuesta para el frontend
+        formatted_result = {
+            "action_units": result.get("action_units", []),
+            "emotions_mediapipe": result.get("emotions_mediapipe", {}),
+            "interpretation": result.get("interpretation", {}),
+            "confidence": result.get("confidence", 0.0)
+        }
+        
+        return {
+            "success": True, 
+            "facs_analysis": formatted_result,
+            "total_aus": len(formatted_result.get("action_units", [])),
+            "aus_codes": [au["code"] for au in formatted_result.get("action_units", [])]
+        }
     except Exception as e:
         logger.error("Error en análisis FACS: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 # ========================================
-# ENDPOINT DE SALUD
+# ENDPOINT DE TEST FACS SIMPLIFICADO
+# ========================================
+@app.get("/test-facs")
+async def test_facs_endpoint():
+    """Endpoint para probar que FACS está funcionando"""
+    return {
+        "facs_disponible": facs_analyzer is not None,
+        "status": "active" if facs_analyzer else "inactive",
+        "message": "FACS MediaPipe está listo" if facs_analyzer else "FACS no disponible"
+    }
+
+# ========================================
+# ENDPOINT DE SALUD MEJORADO
 # ========================================
 @app.get("/health")
 async def health_check():
@@ -456,5 +563,6 @@ async def health_check():
         "status": "healthy",
         "modelo_cargado": 'model' in globals() and model is not None,
         "facs_disponible": facs_analyzer is not None,
-        "supabase_conectado": True
+        "supabase_conectado": True,
+        "timestamp": datetime.utcnow().isoformat()
     }
