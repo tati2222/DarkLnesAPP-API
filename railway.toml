@@ -1,3 +1,7 @@
 [build]
 builder = "NIXPACKS"
-buildCommand = "pip install
+buildCommand = "pip install --no-cache-dir -r api_service/requirements.txt"
+
+[deploy]
+startCommand = "uvicorn api_service.api:app --host 0.0.0.0 --port $PORT"
+restartPolicyType = "never"
