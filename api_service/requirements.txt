@@ -8,7 +8,7 @@ torch==2.1.0
 torchvision==0.16.0
 torchaudio==2.1.0
 
-# Computer Vision - SOLO MediaPipe (SIN PyFeat)
+# Computer Vision -  (SIN PyFeat)
 opencv-python-headless==4.8.1.78
 Pillow==10.1.0
 
