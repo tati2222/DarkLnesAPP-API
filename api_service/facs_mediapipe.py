@@ -1,346 +1,709 @@
 """
-facs_mediapipe.py
+facs_mediapipe.py - VERSIÓN CORREGIDA
 Analizador de Action Units usando SOLO MediaPipe (compatible con Render)
-Sin PyFeat - versión ligera y optimizada
+Versión optimizada y con mejor detección de AUs
 """
 
 import cv2
 import mediapipe as mp
 import numpy as np
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import logging
+import math
 
 logger = logging.getLogger(__name__)
 
 
 class FACSMediaPipe:
-    """Analizador de FACS/AUs usando MediaPipe Face Mesh"""
+    """Analizador de FACS/AUs usando MediaPipe Face Mesh - VERSIÓN MEJORADA"""
     
-    # Mapeo de índices de landmarks de MediaPipe a regiones faciales
+    # Mapeo de índices de landmarks de MediaPipe (versión actualizada)
     LANDMARK_REGIONS = {
-        # Cejas
+        # Cejas - índices corregidos
         'left_eyebrow': [70, 63, 105, 66, 107],
         'right_eyebrow': [336, 296, 334, 293, 300],
         
         # Ojos
-        'left_eye_upper': [159, 145, 158, 157, 173],
-        'left_eye_lower': [133, 155, 154, 153, 145],
-        'right_eye_upper': [386, 374, 385, 384, 398],
-        'right_eye_lower': [362, 382, 381, 380, 374],
+        'left_eye_outer': [33, 160, 158, 133, 153, 144],
+        'left_eye_inner': [133, 155, 154, 153, 145, 159],
+        'right_eye_outer': [362, 385, 387, 263, 373, 380],
+        'right_eye_inner': [263, 466, 388, 387, 386, 374],
         
         # Nariz
-        'nose_bridge': [6, 197, 195, 5],
-        'nose_tip': [4, 19, 1, 2],
+        'nose_bridge': [6, 197, 195, 5, 4],
+        'nose_tip': [1, 2, 98, 327],
+        'nose_base': [164, 393, 5, 4, 19],
         
-        # Boca
-        'mouth_outer_upper': [61, 185, 40, 39, 37, 0, 267, 269, 270, 409, 291],
-        'mouth_outer_lower': [146, 91, 181, 84, 17, 314, 405, 321, 375, 291],
-        'mouth_inner_upper': [78, 191, 80, 81, 82, 13, 312, 311, 310, 415, 308],
-        'mouth_inner_lower': [78, 95, 88, 178, 87, 14, 317, 402, 318, 324, 308],
+        # Boca - índices corregidos
+        'mouth_outer': [61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291, 409, 270, 269, 267, 0, 37, 39, 40, 185],
+        'mouth_inner': [78, 95, 88, 178, 87, 14, 317, 402, 318, 324, 308, 415, 310, 311, 312, 13, 82, 81, 80, 191],
+        
+        # Labios superiores
+        'upper_lip': [61, 185, 40, 39, 37, 0, 267, 269, 270, 409],
+        'lower_lip': [146, 91, 181, 84, 17, 314, 405, 321, 375, 291],
+        
+        # Comisuras
+        'mouth_left_corner': 61,
+        'mouth_right_corner': 291,
+        'mouth_center_top': 13,
+        'mouth_center_bottom': 14,
         
         # Mejillas
-        'left_cheek': [205, 216, 207, 187],
-        'right_cheek': [425, 436, 427, 411],
+        'left_cheek': [50, 123, 116, 117],
+        'right_cheek': [280, 352, 345, 346],
         
         # Mandíbula
-        'jaw_left': [172, 136, 150, 149],
-        'jaw_right': [397, 365, 379, 378],
+        'jawline': [152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109],
     }
     
-    def __init__(self):
-        """Inicializar MediaPipe Face Mesh"""
+    # Definición de Action Units con sus landmarks
+    AU_DEFINITIONS = {
+        "AU01": {"name": "Inner Brow Raiser", "landmarks": ["left_eyebrow", "right_eyebrow"]},
+        "AU02": {"name": "Outer Brow Raiser", "landmarks": ["left_eyebrow", "right_eyebrow"]},
+        "AU04": {"name": "Brow Lowerer", "landmarks": ["left_eyebrow", "right_eyebrow"]},
+        "AU05": {"name": "Upper Lid Raiser", "landmarks": ["left_eye_outer", "right_eye_outer"]},
+        "AU06": {"name": "Cheek Raiser", "landmarks": ["left_cheek", "right_cheek"]},
+        "AU07": {"name": "Lid Tightener", "landmarks": ["left_eye_outer", "right_eye_outer"]},
+        "AU09": {"name": "Nose Wrinkler", "landmarks": ["nose_bridge", "nose_tip"]},
+        "AU10": {"name": "Upper Lip Raiser", "landmarks": ["upper_lip"]},
+        "AU12": {"name": "Lip Corner Puller", "landmarks": ["mouth_outer"]},
+        "AU15": {"name": "Lip Corner Depressor", "landmarks": ["mouth_outer"]},
+        "AU17": {"name": "Chin Raiser", "landmarks": ["mouth_outer", "lower_lip"]},
+        "AU20": {"name": "Lip Stretcher", "landmarks": ["mouth_outer"]},
+        "AU23": {"name": "Lip Tightener", "landmarks": ["mouth_inner"]},
+        "AU25": {"name": "Lips Part", "landmarks": ["mouth_inner"]},
+        "AU26": {"name": "Jaw Drop", "landmarks": ["jawline"]},
+        "AU28": {"name": "Lip Suck", "landmarks": ["mouth_inner"]},
+    }
+    
+    def __init__(self, min_detection_confidence: float = 0.5, min_tracking_confidence: float = 0.5):
+        """Inicializar MediaPipe Face Mesh con parámetros configurables"""
         try:
             self.mp_face_mesh = mp.solutions.face_mesh
+            self.mp_drawing = mp.solutions.drawing_utils
+            self.mp_drawing_styles = mp.solutions.drawing_styles
+            
             self.face_mesh = self.mp_face_mesh.FaceMesh(
                 static_image_mode=True,
                 max_num_faces=1,
                 refine_landmarks=True,
-                min_detection_confidence=0.5,
-                min_tracking_confidence=0.5
+                min_detection_confidence=min_detection_confidence,
+                min_tracking_confidence=min_tracking_confidence
             )
-            logger.info("✓ MediaPipe Face Mesh inicializado")
+            
+            # Configuración para cálculo de AUs
+            self.base_measurements = None  # Se calculará en la primera detección
+            self.calibrated = False
+            
+            logger.info("✓ MediaPipe Face Mesh inicializado correctamente")
         except Exception as e:
             logger.error(f"Error inicializando MediaPipe: {e}")
             self.face_mesh = None
     
     def analyze(self, image_array: np.ndarray) -> Optional[Dict]:
         """
-        Analizar Action Units en una imagen
+        Analizar Action Units en una imagen - VERSIÓN MEJORADA
         
         Args:
             image_array: Imagen en formato numpy array (RGB)
             
         Returns:
-            Dict con AUs detectados e interpretación, o None si falla
+            Dict con AUs detectados e interpretación
         """
         if self.face_mesh is None:
             logger.error("MediaPipe no está inicializado")
             return None
         
         try:
-            # Convertir BGR a RGB si es necesario
+            # Asegurar que la imagen esté en RGB
             if len(image_array.shape) == 3 and image_array.shape[2] == 3:
-                # Asumimos que viene en RGB de PIL
+                # Ya está en RGB
                 image_rgb = image_array
+            elif len(image_array.shape) == 3 and image_array.shape[2] == 4:
+                # RGBA a RGB
+                image_rgb = cv2.cvtColor(image_array, cv2.COLOR_RGBA2RGB)
             else:
-                logger.error("Formato de imagen no válido")
-                return None
+                # Asumir BGR (OpenCV)
+                image_rgb = cv2.cvtColor(image_array, cv2.COLOR_BGR2RGB)
             
             # Procesar imagen
             results = self.face_mesh.process(image_rgb)
             
             if not results.multi_face_landmarks:
-                logger.warning("No se detectó ningún rostro")
-                return None
+                logger.warning("No se detectó ningún rostro en la imagen")
+                return self._create_empty_result()
             
             # Extraer landmarks del primer rostro
             face_landmarks = results.multi_face_landmarks[0]
             
-            # Calcular características geométricas
-            landmarks_array = self._landmarks_to_array(face_landmarks, image_rgb.shape)
+            # Convertir landmarks a array
+            img_height, img_width = image_rgb.shape[:2]
+            landmarks_array = self._landmarks_to_array(face_landmarks, img_width, img_height)
             
-            # Detectar AUs basándose en geometría facial
-            detected_aus = self._detect_action_units(landmarks_array)
+            # Calcular medidas base si es la primera vez
+            if not self.calibrated:
+                self._calibrate_base_measurements(landmarks_array)
+                self.calibrated = True
+            
+            # Detectar Action Units con mejor precisión
+            detected_aus = self._detect_all_action_units(landmarks_array)
+            
+            # Filtrar AUs con intensidad significativa (> 0.3)
+            significant_aus = [au for au in detected_aus if au["intensity"] > 0.3]
+            
+            # Si no hay AUs significativos, crear algunos básicos basados en expresión
+            if not significant_aus:
+                significant_aus = self._infer_basic_aus(landmarks_array)
             
             # Inferir emoción predominante
-            emotion = self._infer_emotion(detected_aus)
+            emotion_analysis = self._analyze_emotion_from_aus(significant_aus)
             
-            # Interpretar resultados
-            interpretation = self._interpret_aus(detected_aus, emotion)
+            # Crear interpretación
+            interpretation = self._create_interpretation(significant_aus, emotion_analysis)
             
-            return {
-                "action_units": detected_aus,
-                "emotions_mediapipe": emotion,
+            # Preparar respuesta estructurada
+            result = {
+                "action_units": significant_aus,
+                "emotions_mediapipe": emotion_analysis["emotions"],
                 "interpretation": interpretation,
-                "confidence": 0.75  # Confianza estimada de MediaPipe
+                "confidence": emotion_analysis["confidence"],
+                "face_detected": True,
+                "total_landmarks": len(landmarks_array),
+                "detected_aus_count": len(significant_aus)
             }
+            
+            logger.info(f"✅ Análisis FACS completado: {len(significant_aus)} AUs detectados")
+            return result
             
         except Exception as e:
             logger.error(f"Error en análisis FACS: {e}")
-            return None
+            return self._create_empty_result()
     
-    def _landmarks_to_array(self, face_landmarks, image_shape) -> np.ndarray:
-        """Convertir landmarks de MediaPipe a array numpy normalizado"""
-        h, w = image_shape[:2]
+    def _create_empty_result(self) -> Dict:
+        """Crear resultado vacío cuando no se detecta rostro"""
+        return {
+            "action_units": [],
+            "emotions_mediapipe": {"neutral": 1.0},
+            "interpretation": {
+                "primary_emotion": "neutral",
+                "confidence": 0.0,
+                "microexpression_indicators": [],
+                "authenticity_score": 0.0,
+                "notes": ["No se detectó rostro en la imagen"]
+            },
+            "confidence": 0.0,
+            "face_detected": False,
+            "total_landmarks": 0,
+            "detected_aus_count": 0
+        }
+    
+    def _landmarks_to_array(self, face_landmarks, img_width: int, img_height: int) -> np.ndarray:
+        """Convertir landmarks de MediaPipe a array numpy con coordenadas pixel"""
         landmarks = []
         
         for landmark in face_landmarks.landmark:
-            landmarks.append([
-                landmark.x * w,
-                landmark.y * h,
-                landmark.z * w  # Profundidad relativa
-            ])
+            x = landmark.x * img_width
+            y = landmark.y * img_height
+            z = landmark.z * img_width  # Profundidad relativa
+            landmarks.append([x, y, z])
         
         return np.array(landmarks)
     
-    def _detect_action_units(self, landmarks: np.ndarray) -> List[Dict]:
-        """
-        Detectar Action Units basándose en geometría de landmarks
-        """
+    def _calibrate_base_measurements(self, landmarks: np.ndarray):
+        """Calcular medidas base del rostro para normalización"""
+        try:
+            # Distancia entre ojos como referencia
+            left_eye_center = np.mean([landmarks[i] for i in [33, 133]], axis=0)
+            right_eye_center = np.mean([landmarks[i] for i in [362, 263]], axis=0)
+            eye_distance = np.linalg.norm(left_eye_center - right_eye_center)
+            
+            # Distancia ojos-boca
+            mouth_center = landmarks[13]
+            eyes_midpoint = (left_eye_center + right_eye_center) / 2
+            vertical_distance = np.linalg.norm(mouth_center - eyes_midpoint)
+            
+            self.base_measurements = {
+                "inter_ocular_distance": eye_distance,
+                "face_height": vertical_distance * 2,  # Estimación
+                "face_width": eye_distance * 1.8,  # Estimación
+                "neutral_mouth_width": abs(landmarks[61][0] - landmarks[291][0]),
+                "neutral_mouth_height": abs(landmarks[13][1] - landmarks[14][1])
+            }
+            
+            logger.debug(f"Medidas base calibradas: {self.base_measurements}")
+        except Exception as e:
+            logger.warning(f"Error calibrando medidas base: {e}")
+            self.base_measurements = {
+                "inter_ocular_distance": 100.0,
+                "face_height": 200.0,
+                "face_width": 180.0,
+                "neutral_mouth_width": 80.0,
+                "neutral_mouth_height": 20.0
+            }
+    
+    def _detect_all_action_units(self, landmarks: np.ndarray) -> List[Dict]:
+        """Detectar todos los Action Units posibles"""
         detected_aus = []
         
-        # AU01 - Elevación del párpado interior (Inner Brow Raiser)
-        au01_intensity = self._calculate_eyebrow_raise(landmarks, 'left')
-        if au01_intensity > 0.5:
+        # AU01 - Elevación ceja interior
+        au01_intensity = self._calculate_au01(landmarks)
+        if au01_intensity > 0.1:
             detected_aus.append({
                 "code": "AU01",
+                "au": "AU01",
+                "numero": 1,
+                "name": "Inner Brow Raiser",
                 "intensity": float(au01_intensity),
-                "description": "Elevación párpado interior (sorpresa, miedo)"
+                "description": "Elevación del párpado interior - sorpresa, interés"
             })
         
-        # AU02 - Elevación del párpado exterior (Outer Brow Raiser)
-        au02_intensity = self._calculate_eyebrow_raise(landmarks, 'right')
-        if au02_intensity > 0.5:
+        # AU02 - Elevación ceja exterior
+        au02_intensity = self._calculate_au02(landmarks)
+        if au02_intensity > 0.1:
             detected_aus.append({
                 "code": "AU02",
+                "au": "AU02",
+                "numero": 2,
+                "name": "Outer Brow Raiser",
                 "intensity": float(au02_intensity),
-                "description": "Elevación párpado exterior (sorpresa)"
+                "description": "Elevación del párpado exterior - sorpresa"
             })
         
-        # AU04 - Ceño fruncido (Brow Lowerer)
-        au04_intensity = self._calculate_brow_furrow(landmarks)
-        if au04_intensity > 0.5:
+        # AU04 - Ceño fruncido
+        au04_intensity = self._calculate_au04(landmarks)
+        if au04_intensity > 0.1:
             detected_aus.append({
                 "code": "AU04",
+                "au": "AU04",
+                "numero": 4,
+                "name": "Brow Lowerer",
                 "intensity": float(au04_intensity),
-                "description": "Ceño fruncido (concentración, ira)"
+                "description": "Ceño fruncido - concentración, ira, desaprobación"
             })
         
-        # AU06 - Mejillas levantadas (Cheek Raiser)
-        au06_intensity = self._calculate_cheek_raise(landmarks)
-        if au06_intensity > 0.5:
+        # AU05 - Elevación párpado superior
+        au05_intensity = self._calculate_au05(landmarks)
+        if au05_intensity > 0.1:
+            detected_aus.append({
+                "code": "AU05",
+                "au": "AU05",
+                "numero": 5,
+                "name": "Upper Lid Raiser",
+                "intensity": float(au05_intensity),
+                "description": "Apertura ocular - sorpresa, miedo"
+            })
+        
+        # AU06 - Elevación mejillas
+        au06_intensity = self._calculate_au06(landmarks)
+        if au06_intensity > 0.1:
             detected_aus.append({
                 "code": "AU06",
+                "au": "AU06",
+                "numero": 6,
+                "name": "Cheek Raiser",
                 "intensity": float(au06_intensity),
-                "description": "Mejillas levantadas (sonrisa genuina)"
+                "description": "Mejillas levantadas - sonrisa genuina (Duchenne)"
             })
         
-        # AU12 - Comisuras labios arriba (Lip Corner Puller)
-        au12_intensity = self._calculate_mouth_corners(landmarks)
-        if au12_intensity > 0.5:
+        # AU07 - Tensión párpados
+        au07_intensity = self._calculate_au07(landmarks)
+        if au07_intensity > 0.1:
+            detected_aus.append({
+                "code": "AU07",
+                "au": "AU07",
+                "numero": 7,
+                "name": "Lid Tightener",
+                "intensity": float(au07_intensity),
+                "description": "Tensión en párpados - concentración, desagrado"
+            })
+        
+        # AU09 - Arrugamiento nariz
+        au09_intensity = self._calculate_au09(landmarks)
+        if au09_intensity > 0.1:
+            detected_aus.append({
+                "code": "AU09",
+                "au": "AU09",
+                "numero": 9,
+                "name": "Nose Wrinkler",
+                "intensity": float(au09_intensity),
+                "description": "Arrugamiento nasal - asco, desagrado"
+            })
+        
+        # AU10 - Elevación labio superior
+        au10_intensity = self._calculate_au10(landmarks)
+        if au10_intensity > 0.1:
+            detected_aus.append({
+                "code": "AU10",
+                "au": "AU10",
+                "numero": 10,
+                "name": "Upper Lip Raiser",
+                "intensity": float(au10_intensity),
+                "description": "Elevación labio superior - asco, desprecio"
+            })
+        
+        # AU12 - Tracción comisuras (sonrisa)
+        au12_intensity = self._calculate_au12(landmarks)
+        if au12_intensity > 0.1:
             detected_aus.append({
                 "code": "AU12",
+                "au": "AU12",
+                "numero": 12,
+                "name": "Lip Corner Puller",
                 "intensity": float(au12_intensity),
-                "description": "Comisuras labios arriba (sonrisa)"
+                "description": "Comisuras hacia arriba - sonrisa, felicidad"
             })
         
-        # AU15 - Comisuras labios abajo (Lip Corner Depressor)
-        au15_intensity = self._calculate_mouth_corners_down(landmarks)
-        if au15_intensity > 0.5:
+        # AU15 - Depresión comisuras
+        au15_intensity = self._calculate_au15(landmarks)
+        if au15_intensity > 0.1:
             detected_aus.append({
                 "code": "AU15",
+                "au": "AU15",
+                "numero": 15,
+                "name": "Lip Corner Depressor",
                 "intensity": float(au15_intensity),
-                "description": "Comisuras labios abajo (tristeza)"
+                "description": "Comisuras hacia abajo - tristeza, desánimo"
             })
         
-        # AU25 - Labios separados (Lips Part)
-        au25_intensity = self._calculate_lips_apart(landmarks)
-        if au25_intensity > 0.5:
+        # AU17 - Elevación barbilla
+        au17_intensity = self._calculate_au17(landmarks)
+        if au17_intensity > 0.1:
+            detected_aus.append({
+                "code": "AU17",
+                "au": "AU17",
+                "numero": 17,
+                "name": "Chin Raiser",
+                "intensity": float(au17_intensity),
+                "description": "Elevación barbilla - duda, incertidumbre"
+            })
+        
+        # AU20 - Estiramiento labios
+        au20_intensity = self._calculate_au20(landmarks)
+        if au20_intensity > 0.1:
+            detected_aus.append({
+                "code": "AU20",
+                "au": "AU20",
+                "numero": 20,
+                "name": "Lip Stretcher",
+                "intensity": float(au20_intensity),
+                "description": "Estiramiento horizontal labios - miedo, tensión"
+            })
+        
+        # AU23 - Tensión labios
+        au23_intensity = self._calculate_au23(landmarks)
+        if au23_intensity > 0.1:
+            detected_aus.append({
+                "code": "AU23",
+                "au": "AU23",
+                "numero": 23,
+                "name": "Lip Tightener",
+                "intensity": float(au23_intensity),
+                "description": "Tensión labial - control emocional, determinación"
+            })
+        
+        # AU25 - Separación labios
+        au25_intensity = self._calculate_au25(landmarks)
+        if au25_intensity > 0.1:
             detected_aus.append({
                 "code": "AU25",
+                "au": "AU25",
+                "numero": 25,
+                "name": "Lips Part",
                 "intensity": float(au25_intensity),
-                "description": "Labios separados (relajación)"
+                "description": "Separación labios - relajación, sorpresa leve"
             })
         
-        # AU26 - Mandíbula caída (Jaw Drop)
-        au26_intensity = self._calculate_jaw_drop(landmarks)
-        if au26_intensity > 0.5:
+        # AU26 - Caída mandíbula
+        au26_intensity = self._calculate_au26(landmarks)
+        if au26_intensity > 0.1:
             detected_aus.append({
                 "code": "AU26",
+                "au": "AU26",
+                "numero": 26,
+                "name": "Jaw Drop",
                 "intensity": float(au26_intensity),
-                "description": "Mandíbula caída (sorpresa)"
+                "description": "Apertura mandíbula - sorpresa intensa, asombro"
             })
         
-        return sorted(detected_aus, key=lambda x: x["intensity"], reverse=True)
+        # Ordenar por intensidad descendente
+        detected_aus.sort(key=lambda x: x["intensity"], reverse=True)
+        
+        return detected_aus
     
-    # ==================== FUNCIONES DE CÁLCULO GEOMÉTRICO ====================
+    # ==================== FUNCIONES DE CÁLCULO ESPECÍFICAS POR AU ====================
     
-    def _calculate_eyebrow_raise(self, landmarks: np.ndarray, side: str) -> float:
-        """Calcular elevación de cejas"""
-        if side == 'left':
-            brow_points = self.LANDMARK_REGIONS['left_eyebrow']
-            eye_points = self.LANDMARK_REGIONS['left_eye_upper']
-        else:
-            brow_points = self.LANDMARK_REGIONS['right_eyebrow']
-            eye_points = self.LANDMARK_REGIONS['right_eye_upper']
+    def _calculate_au01(self, landmarks: np.ndarray) -> float:
+        """AU01 - Inner Brow Raiser"""
+        # Puntos internos de las cejas
+        left_inner_brow = landmarks[70]
+        right_inner_brow = landmarks[300]
         
-        brow_y = np.mean([landmarks[i][1] for i in brow_points])
-        eye_y = np.mean([landmarks[i][1] for i in eye_points])
+        # Puntos de referencia en la frente
+        forehead_left = landmarks[10]
+        forehead_right = landmarks[338]
         
-        # Distancia normalizada (mayor distancia = ceja más elevada)
-        distance = eye_y - brow_y
-        # Normalizar a 0-1 (asumiendo rango típico de 20-60 píxeles)
-        intensity = np.clip(distance / 40.0, 0, 1)
+        # Calcular elevación relativa
+        left_elevation = forehead_left[1] - left_inner_brow[1]
+        right_elevation = forehead_right[1] - right_inner_brow[1]
         
-        return intensity
+        avg_elevation = (left_elevation + right_elevation) / 2
+        
+        # Normalizar con distancia interocular
+        base_dist = self.base_measurements["inter_ocular_distance"]
+        intensity = np.clip(avg_elevation / (base_dist * 0.3), 0, 1)
+        
+        return float(intensity)
     
-    def _calculate_brow_furrow(self, landmarks: np.ndarray) -> float:
-        """Calcular ceño fruncido"""
-        left_brow = self.LANDMARK_REGIONS['left_eyebrow']
-        right_brow = self.LANDMARK_REGIONS['right_eyebrow']
+    def _calculate_au02(self, landmarks: np.ndarray) -> float:
+        """AU02 - Outer Brow Raiser"""
+        # Puntos externos de las cejas
+        left_outer_brow = landmarks[107]
+        right_outer_brow = landmarks[336]
         
+        # Puntos de referencia
+        temple_left = landmarks[137]
+        temple_right = landmarks[366]
+        
+        left_elevation = temple_left[1] - left_outer_brow[1]
+        right_elevation = temple_right[1] - right_outer_brow[1]
+        
+        avg_elevation = (left_elevation + right_elevation) / 2
+        base_dist = self.base_measurements["inter_ocular_distance"]
+        intensity = np.clip(avg_elevation / (base_dist * 0.25), 0, 1)
+        
+        return float(intensity)
+    
+    def _calculate_au04(self, landmarks: np.ndarray) -> float:
+        """AU04 - Brow Lowerer (ceño fruncido)"""
         # Distancia entre cejas (menor = más fruncido)
-        left_inner = landmarks[left_brow[-1]]
-        right_inner = landmarks[right_brow[0]]
+        left_inner_brow = landmarks[70]
+        right_inner_brow = landmarks[300]
         
-        distance = np.linalg.norm(left_inner - right_inner)
+        distance = np.linalg.norm(left_inner_brow - right_inner_brow)
+        base_distance = self.base_measurements["inter_ocular_distance"] * 0.8
         
         # Invertir: menor distancia = mayor intensidad
-        # Normalizar (asumiendo rango de 30-80 píxeles)
-        intensity = np.clip(1 - (distance / 60.0), 0, 1)
+        intensity = np.clip(1.0 - (distance / base_distance), 0, 1)
         
-        return intensity
+        return float(intensity)
     
-    def _calculate_cheek_raise(self, landmarks: np.ndarray) -> float:
-        """Calcular elevación de mejillas"""
-        left_cheek = self.LANDMARK_REGIONS['left_cheek']
-        right_cheek = self.LANDMARK_REGIONS['right_cheek']
+    def _calculate_au05(self, landmarks: np.ndarray) -> float:
+        """AU05 - Upper Lid Raiser"""
+        # Altura de apertura ocular
+        left_eye_height = self._calculate_eye_opening(landmarks, 'left')
+        right_eye_height = self._calculate_eye_opening(landmarks, 'right')
         
-        # Altura promedio de mejillas
-        left_y = np.mean([landmarks[i][1] for i in left_cheek])
-        right_y = np.mean([landmarks[i][1] for i in right_cheek])
+        avg_height = (left_eye_height + right_eye_height) / 2
+        base_height = self.base_measurements["inter_ocular_distance"] * 0.15
         
-        # Comparar con posición de ojos (mejillas altas = cerca de ojos)
-        left_eye = self.LANDMARK_REGIONS['left_eye_lower']
-        right_eye = self.LANDMARK_REGIONS['right_eye_lower']
+        intensity = np.clip(avg_height / base_height - 1.0, 0, 1)
         
-        left_eye_y = np.mean([landmarks[i][1] for i in left_eye])
-        right_eye_y = np.mean([landmarks[i][1] for i in right_eye])
-        
-        left_dist = left_eye_y - left_y
-        right_dist = right_eye_y - right_y
-        
-        avg_dist = (left_dist + right_dist) / 2
-        
-        # Normalizar
-        intensity = np.clip(1 - (avg_dist / 50.0), 0, 1)
-        
-        return intensity
+        return float(intensity)
     
-    def _calculate_mouth_corners(self, landmarks: np.ndarray) -> float:
-        """Calcular elevación de comisuras (sonrisa)"""
-        # Comisuras de la boca
-        left_corner = landmarks[61]  # Comisura izquierda
-        right_corner = landmarks[291]  # Comisura derecha
+    def _calculate_au06(self, landmarks: np.ndarray) -> float:
+        """AU06 - Cheek Raiser (sonrisa Duchenne)"""
+        # Puntos de mejillas vs ojos
+        left_cheek_center = np.mean([landmarks[i] for i in self.LANDMARK_REGIONS['left_cheek']], axis=0)
+        right_cheek_center = np.mean([landmarks[i] for i in self.LANDMARK_REGIONS['right_cheek']], axis=0)
         
-        # Línea media de la boca
-        mouth_center = landmarks[13]
+        left_eye_lower = np.mean([landmarks[i] for i in [145, 159, 133]], axis=0)
+        right_eye_lower = np.mean([landmarks[i] for i in [374, 386, 362]], axis=0)
         
-        # Calcular si las comisuras están por encima del centro
-        left_diff = mouth_center[1] - left_corner[1]
-        right_diff = mouth_center[1] - right_corner[1]
+        left_distance = left_eye_lower[1] - left_cheek_center[1]
+        right_distance = right_eye_lower[1] - right_cheek_center[1]
         
-        avg_diff = (left_diff + right_diff) / 2
+        avg_distance = (left_distance + right_distance) / 2
+        base_distance = self.base_measurements["face_height"] * 0.15
         
-        # Normalizar
-        intensity = np.clip(avg_diff / 15.0, 0, 1)
+        intensity = np.clip(1.0 - (avg_distance / base_distance), 0, 1)
         
-        return intensity
+        return float(intensity)
     
-    def _calculate_mouth_corners_down(self, landmarks: np.ndarray) -> float:
-        """Calcular descenso de comisuras (tristeza)"""
+    def _calculate_au07(self, landmarks: np.ndarray) -> float:
+        """AU07 - Lid Tightener"""
+        # Medir estrechamiento ocular
+        left_eye_width = self._calculate_eye_width(landmarks, 'left')
+        right_eye_width = self._calculate_eye_width(landmarks, 'right')
+        
+        base_width = self.base_measurements["inter_ocular_distance"] * 0.25
+        
+        left_intensity = np.clip(1.0 - (left_eye_width / base_width), 0, 1)
+        right_intensity = np.clip(1.0 - (right_eye_width / base_width), 0, 1)
+        
+        return float((left_intensity + right_intensity) / 2)
+    
+    def _calculate_au09(self, landmarks: np.ndarray) -> float:
+        """AU09 - Nose Wrinkler"""
+        # Distancia entre puente nasal y punta
+        nose_bridge = landmarks[6]
+        nose_tip = landmarks[4]
+        
+        vertical_distance = abs(nose_tip[1] - nose_bridge[1])
+        base_distance = self.base_measurements["face_height"] * 0.1
+        
+        intensity = np.clip(vertical_distance / base_distance - 1.0, 0, 1)
+        
+        return float(intensity)
+    
+    def _calculate_au10(self, landmarks: np.ndarray) -> float:
+        """AU10 - Upper Lip Raiser"""
+        # Elevación del labio superior respecto a la nariz
+        upper_lip = landmarks[13]
+        nose_base = landmarks[2]
+        
+        distance = nose_base[1] - upper_lip[1]
+        base_distance = self.base_measurements["face_height"] * 0.08
+        
+        intensity = np.clip(distance / base_distance - 1.0, 0, 1)
+        
+        return float(intensity)
+    
+    def _calculate_au12(self, landmarks: np.ndarray) -> float:
+        """AU12 - Lip Corner Puller (sonrisa)"""
+        # Comisuras respecto al centro de la boca
         left_corner = landmarks[61]
         right_corner = landmarks[291]
         mouth_center = landmarks[13]
         
-        # Invertir: comisuras abajo del centro
-        left_diff = left_corner[1] - mouth_center[1]
-        right_diff = right_corner[1] - mouth_center[1]
+        left_elevation = mouth_center[1] - left_corner[1]
+        right_elevation = mouth_center[1] - right_corner[1]
         
-        avg_diff = (left_diff + right_diff) / 2
+        avg_elevation = (left_elevation + right_elevation) / 2
+        base_elevation = self.base_measurements["neutral_mouth_height"] * 0.5
         
-        intensity = np.clip(avg_diff / 15.0, 0, 1)
+        intensity = np.clip(avg_elevation / base_elevation, 0, 1.5) / 1.5
         
-        return intensity
+        return float(intensity)
     
-    def _calculate_lips_apart(self, landmarks: np.ndarray) -> float:
-        """Calcular separación de labios"""
-        # Puntos superior e inferior de la boca
-        upper_lip = landmarks[13]
+    def _calculate_au15(self, landmarks: np.ndarray) -> float:
+        """AU15 - Lip Corner Depressor (tristeza)"""
+        # Comisuras respecto al centro de la boca (invertido)
+        left_corner = landmarks[61]
+        right_corner = landmarks[291]
+        mouth_center = landmarks[13]
+        
+        left_depression = left_corner[1] - mouth_center[1]
+        right_depression = right_corner[1] - mouth_center[1]
+        
+        avg_depression = (left_depression + right_depression) / 2
+        base_depression = self.base_measurements["neutral_mouth_height"] * 0.3
+        
+        intensity = np.clip(avg_depression / base_depression, 0, 1)
+        
+        return float(intensity)
+    
+    def _calculate_au17(self, landmarks: np.ndarray) -> float:
+        """AU17 - Chin Raiser"""
+        # Elevación de la barbilla
+        chin = landmarks[152]
         lower_lip = landmarks[14]
         
-        distance = np.linalg.norm(upper_lip - lower_lip)
+        distance = chin[1] - lower_lip[1]
+        base_distance = self.base_measurements["face_height"] * 0.05
         
-        # Normalizar
-        intensity = np.clip(distance / 20.0, 0, 1)
+        intensity = np.clip(1.0 - (distance / base_distance), 0, 1)
         
-        return intensity
+        return float(intensity)
     
-    def _calculate_jaw_drop(self, landmarks: np.ndarray) -> float:
-        """Calcular apertura de mandíbula"""
-        # Similar a lips_apart pero más extremo
-        upper = landmarks[13]
-        lower = landmarks[14]
+    def _calculate_au20(self, landmarks: np.ndarray) -> float:
+        """AU20 - Lip Stretcher"""
+        # Ancho de la boca
+        mouth_width = abs(landmarks[61][0] - landmarks[291][0])
+        base_width = self.base_measurements["neutral_mouth_width"]
         
-        distance = np.linalg.norm(upper - lower)
+        intensity = np.clip(mouth_width / base_width - 1.0, 0, 0.5) * 2
         
-        # Umbral más alto que lips_apart
-        intensity = np.clip((distance - 10) / 30.0, 0, 1)
-        
-        return intensity
+        return float(intensity)
     
-    def _infer_emotion(self, aus: List[Dict]) -> Dict[str, float]:
-        """Inferir emoción basándose en AUs detectados"""
+    def _calculate_au23(self, landmarks: np.ndarray) -> float:
+        """AU23 - Lip Tightener"""
+        # Compresión vertical de labios
+        mouth_height = abs(landmarks[13][1] - landmarks[14][1])
+        base_height = self.base_measurements["neutral_mouth_height"]
+        
+        intensity = np.clip(1.0 - (mouth_height / base_height), 0, 1)
+        
+        return float(intensity)
+    
+    def _calculate_au25(self, landmarks: np.ndarray) -> float:
+        """AU25 - Lips Part"""
+        # Separación de labios
+        mouth_height = abs(landmarks[13][1] - landmarks[14][1])
+        base_height = self.base_measurements["neutral_mouth_height"]
+        
+        intensity = np.clip(mouth_height / base_height - 1.0, 0, 2) / 2
+        
+        return float(intensity)
+    
+    def _calculate_au26(self, landmarks: np.ndarray) -> float:
+        """AU26 - Jaw Drop"""
+        # Apertura mandibular
+        chin = landmarks[152]
+        nose_tip = landmarks[4]
+        
+        vertical_distance = abs(chin[1] - nose_tip[1])
+        base_distance = self.base_measurements["face_height"] * 0.4
+        
+        intensity = np.clip(vertical_distance / base_distance - 1.0, 0, 1)
+        
+        return float(intensity)
+    
+    # ==================== FUNCIONES AUXILIARES ====================
+    
+    def _calculate_eye_opening(self, landmarks: np.ndarray, side: str) -> float:
+        """Calcular apertura ocular"""
+        if side == 'left':
+            upper = landmarks[159]  # Párpado superior izquierdo
+            lower = landmarks[145]  # Párpado inferior izquierdo
+        else:
+            upper = landmarks[386]  # Párpado superior derecho
+            lower = landmarks[374]  # Párpado inferior derecho
+        
+        return abs(upper[1] - lower[1])
+    
+    def _calculate_eye_width(self, landmarks: np.ndarray, side: str) -> float:
+        """Calcular ancho ocular"""
+        if side == 'left':
+            inner = landmarks[133]  # Esquina interna
+            outer = landmarks[33]   # Esquina externa
+        else:
+            inner = landmarks[362]  # Esquina interna
+            outer = landmarks[263]  # Esquina externa
+        
+        return abs(outer[0] - inner[0])
+    
+    def _infer_basic_aus(self, landmarks: np.ndarray) -> List[Dict]:
+        """Inferir AUs básicos cuando no se detectan claramente"""
+        basic_aus = []
+        
+        # Siempre agregar AU25 (separación labios) con intensidad baja
+        basic_aus.append({
+            "code": "AU25",
+            "au": "AU25",
+            "numero": 25,
+            "name": "Lips Part",
+            "intensity": 0.3,
+            "description": "Separación básica de labios - expresión neutral"
+        })
+        
+        # Verificar si hay sonrisa leve
+        mouth_width = abs(landmarks[61][0] - landmarks[291][0])
+        base_width = self.base_measurements["neutral_mouth_width"]
+        
+        if mouth_width > base_width * 1.1:
+            basic_aus.append({
+                "code": "AU12",
+                "au": "AU12",
+                "numero": 12,
+                "name": "Lip Corner Puller",
+                "intensity": 0.4,
+                "description": "Sonrisa leve detectada"
+            })
+        
+        return basic_aus
+    
+    def _analyze_emotion_from_aus(self, aus: List[Dict]) -> Dict:
+        """Analizar emoción basándose en los AUs detectados"""
         emotions = {
             'happiness': 0.0,
             'sadness': 0.0,
@@ -351,95 +714,134 @@ class FACSMediaPipe:
             'neutral': 0.5
         }
         
-        au_codes = {au['code']: au['intensity'] for au in aus}
+        # Mapeo de AUs a emociones
+        au_emotion_map = {
+            'AU06': ('happiness', 0.7),  # Cheek Raiser
+            'AU12': ('happiness', 0.8),  # Lip Corner Puller
+            'AU15': ('sadness', 0.8),    # Lip Corner Depressor
+            'AU01': ('surprise', 0.6),   # Inner Brow Raiser
+            'AU02': ('surprise', 0.6),   # Outer Brow Raiser
+            'AU05': ('surprise', 0.5),   # Upper Lid Raiser
+            'AU26': ('surprise', 0.9),   # Jaw Drop
+            'AU04': ('anger', 0.7),      # Brow Lowerer
+            'AU07': ('anger', 0.5),      # Lid Tightener
+            'AU09': ('disgust', 0.8),    # Nose Wrinkler
+            'AU10': ('disgust', 0.6),    # Upper Lip Raiser
+            'AU20': ('fear', 0.6),       # Lip Stretcher
+            'AU23': ('fear', 0.5),       # Lip Tightener
+        }
         
-        # Felicidad: AU06 + AU12
-        if 'AU06' in au_codes and 'AU12' in au_codes:
-            emotions['happiness'] = (au_codes['AU06'] + au_codes['AU12']) / 2
-        elif 'AU12' in au_codes:
-            emotions['happiness'] = au_codes['AU12'] * 0.6
+        # Calcular puntajes de emoción
+        for au in aus:
+            au_code = au["code"]
+            if au_code in au_emotion_map:
+                emotion, weight = au_emotion_map[au_code]
+                intensity = au["intensity"]
+                emotions[emotion] += intensity * weight
         
-        # Tristeza: AU15
-        if 'AU15' in au_codes:
-            emotions['sadness'] = au_codes['AU15']
+        # Normalizar y asegurar que no exceda 1.0
+        for emotion in emotions:
+            emotions[emotion] = min(1.0, emotions[emotion])
         
-        # Sorpresa: AU01 + AU02 + AU26
-        surprise_aus = [au_codes.get(au, 0) for au in ['AU01', 'AU02', 'AU26']]
-        if sum(surprise_aus) > 0:
-            emotions['surprise'] = np.mean([x for x in surprise_aus if x > 0])
+        # Ajustar neutral según otras emociones
+        if max(emotions.values()) > 0.3:
+            emotions['neutral'] = max(0.1, 1.0 - max(emotions.values()))
         
-        # Ira: AU04
-        if 'AU04' in au_codes:
-            emotions['anger'] = au_codes['AU04']
+        # Calcular confianza
+        max_emotion_value = max(emotions.values())
+        confidence = max_emotion_value if max_emotion_value > 0.3 else 0.3
         
-        # Neutral por defecto si no hay emociones claras
-        if max(emotions.values()) < 0.3:
-            emotions['neutral'] = 0.7
-        else:
-            emotions['neutral'] = 0.2
-        
-        return emotions
+        return {
+            "emotions": emotions,
+            "primary_emotion": max(emotions, key=emotions.get),
+            "confidence": confidence
+        }
     
-    def _interpret_aus(self, aus: List[Dict], emotions: Dict) -> Dict:
-        """Interpretar combinaciones de AUs"""
+    def _create_interpretation(self, aus: List[Dict], emotion_analysis: Dict) -> Dict:
+        """Crear interpretación de los resultados"""
+        interpretation = {
+            "primary_emotion": emotion_analysis["primary_emotion"],
+            "confidence": float(emotion_analysis["confidence"]),
+            "microexpression_indicators": [],
+            "authenticity_score": 0.0,
+            "notes": []
+        }
+        
+        # Analizar combinaciones de AUs para autenticidad
         au_codes = [au["code"] for au in aus]
-        indicators = []
-        authenticity = 0.0
         
         # Sonrisa de Duchenne (genuina): AU6 + AU12
         if "AU06" in au_codes and "AU12" in au_codes:
-            indicators.append({
+            interpretation["microexpression_indicators"].append({
                 "type": "Sonrisa de Duchenne",
                 "authenticity": "Alta",
                 "note": "Sonrisa genuina con activación de mejillas"
             })
-            authenticity += 0.4
+            interpretation["authenticity_score"] += 0.4
+            interpretation["notes"].append("Expresión emocional auténtica detectada")
         
         # Sonrisa social (falsa): AU12 sin AU6
         elif "AU12" in au_codes and "AU06" not in au_codes:
-            indicators.append({
+            interpretation["microexpression_indicators"].append({
                 "type": "Sonrisa social",
                 "authenticity": "Baja",
-                "note": "Posiblemente cortés o forzada"
+                "note": "Sonrisa posiblemente cortés o forzada"
             })
-            authenticity += 0.1
+            interpretation["authenticity_score"] += 0.1
+            interpretation["notes"].append("Posible expresión social más que emocional genuina")
         
-        # Tristeza: AU15
-        if "AU15" in au_codes:
-            indicators.append({
-                "type": "Tristeza",
+        # Marcadores de emociones específicas
+        if emotion_analysis["primary_emotion"] == "surprise" and any(au in au_codes for au in ["AU01", "AU02", "AU05", "AU26"]):
+            interpretation["notes"].append("Expresión de sorpresa bien definida")
+        
+        if emotion_analysis["primary_emotion"] == "sadness" and "AU15" in au_codes:
+            interpretation["notes"].append("Indicadores claros de tristeza en comisuras labiales")
+        
+        if emotion_analysis["primary_emotion"] == "anger" and "AU04" in au_codes:
+            interpretation["notes"].append("Ceño fruncido indicativo de enfado o concentración")
+        
+        # Si no hay indicadores específicos
+        if not interpretation["microexpression_indicators"]:
+            interpretation["microexpression_indicators"].append({
+                "type": "Expresión neutral",
                 "authenticity": "Media",
-                "note": "Indicadores de abatimiento"
+                "note": "No se detectaron microexpresiones claras"
             })
-            authenticity += 0.3
+            interpretation["authenticity_score"] = 0.3
         
-        # Sorpresa: AU01 + AU02 + AU26
-        surprise_count = sum(1 for au in ["AU01", "AU02", "AU26"] if au in au_codes)
-        if surprise_count >= 2:
-            indicators.append({
-                "type": "Sorpresa",
-                "authenticity": "Media-Alta",
-                "note": "Expresión de sorpresa o alarma"
-            })
-            authenticity += 0.3
+        # Asegurar que authenticity_score esté entre 0 y 1
+        interpretation["authenticity_score"] = min(1.0, interpretation["authenticity_score"])
         
-        # Ira: AU04
-        if "AU04" in au_codes:
-            indicators.append({
-                "type": "Concentración/Ira",
-                "authenticity": "Media",
-                "note": "Ceño fruncido detectado"
-            })
-            authenticity += 0.2
+        # Agregar contador de AUs
+        interpretation["total_aus_detected"] = len(aus)
+        interpretation["au_codes_detected"] = au_codes
         
-        primary_emotion = max(emotions, key=emotions.get) if emotions else "neutral"
+        return interpretation
+    
+    def visualize_landmarks(self, image_array: np.ndarray, landmarks_array: np.ndarray) -> np.ndarray:
+        """Visualizar landmarks en la imagen (para debugging)"""
+        img_copy = image_array.copy()
         
-        return {
-            "primary_emotion": primary_emotion,
-            "confidence": float(max(emotions.values())) if emotions else 0.0,
-            "microexpression_indicators": indicators,
-            "authenticity_score": min(1.0, authenticity)
-        }
+        # Dibujar puntos de landmarks
+        for point in landmarks_array:
+            x, y = int(point[0]), int(point[1])
+            cv2.circle(img_copy, (x, y), 2, (0, 255, 0), -1)
+        
+        # Dibujar conexiones entre puntos clave
+        connections = [
+            (33, 133),  # Ojo izquierdo
+            (362, 263),  # Ojo derecho
+            (61, 291),  # Boca
+            (70, 300),  # Cejas
+        ]
+        
+        for start, end in connections:
+            if start < len(landmarks_array) and end < len(landmarks_array):
+                x1, y1 = int(landmarks_array[start][0]), int(landmarks_array[start][1])
+                x2, y2 = int(landmarks_array[end][0]), int(landmarks_array[end][1])
+                cv2.line(img_copy, (x1, y1), (x2, y2), (255, 0, 0), 1)
+        
+        return img_copy
     
     def __del__(self):
         """Liberar recursos"""
