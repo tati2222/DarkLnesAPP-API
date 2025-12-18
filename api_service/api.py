@@ -505,7 +505,7 @@ async def analyze(
     
     # 6. Guardar en base de datos Supabase
     try:
-        db_response = supabase.table("darklens_records").insert(record_data).execute()
+        db_response = supabase.table("DarkLens_records").insert(record_data).execute()
         
         if hasattr(db_response, 'error') and db_response.error:
             logger.warning(f"Error insertando en BD: {db_response.error}")
