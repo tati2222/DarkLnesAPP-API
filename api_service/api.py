@@ -27,7 +27,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Supabase
-SUPABASE_URL = "https://cdhndtzuwtmvhiulvzbp.supabase.co"
+SUPABASE_URL = "https://qkwddddyxucglucjklda.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNkaG5kdHp1d3RtdmhpdWx2emJwIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2NDM1MTU5NywiZXhwIjoyMDc5OTI3NTk3fQ.-vqSP3Vy1qLPoDcTZfo58lhcs1ydTgsgPVh8yGyX5eU"
 
 # URL del modelo en Supabase Storage
